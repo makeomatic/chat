@@ -84,11 +84,11 @@ RUN apk update && \
 WORKDIR /opt/tinode
 
 # Get the desired Tinode build.
-ADD https://github.com/tinode/chat/releases/download/v$VERSION/tinode-$TARGET_DB.linux-amd64.tar.gz .
+ADD ./releases/$VERSION/tinode-$TARGET_DB.linux-amd64.tar.gz .
 
 # Unpack the Tinode archive.
-RUN tar -xzf tinode-$TARGET_DB.linux-amd64.tar.gz \
-	&& rm tinode-$TARGET_DB.linux-amd64.tar.gz
+# RUN tar -xzf tinode-$TARGET_DB.linux-amd64.tar.gz \
+# 	&& rm tinode-$TARGET_DB.linux-amd64.tar.gz
 
 # Copy config template to the container.
 COPY config.template .
