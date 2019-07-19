@@ -174,7 +174,7 @@ func (s *Session) unsubAll() {
 	}
 }
 
-// queueOut attempts to send a ServerComMessage to a session; if the send buffer is full, timeout is 50 usec
+// queueOut attempts to send a ServerComMessage to a session; if the send buffer is full, timeout is 500 usec
 func (s *Session) queueOut(msg *ServerComMessage) bool {
 	if s == nil {
 		return true
@@ -182,7 +182,7 @@ func (s *Session) queueOut(msg *ServerComMessage) bool {
 
 	select {
 	case s.send <- s.serialize(msg):
-	case <-time.After(time.Microsecond * 50):
+	case <-time.After(time.Microsecond * 500):
 		log.Println("s.queueOut: timeout", s.sid)
 		return false
 	}
@@ -190,7 +190,7 @@ func (s *Session) queueOut(msg *ServerComMessage) bool {
 }
 
 // queueOutBytes attempts to send a ServerComMessage already serialized to []byte.
-// If the send buffer is full, timeout is 50 usec
+// If the send buffer is full, timeout is 500 usec
 func (s *Session) queueOutBytes(data []byte) bool {
 	if s == nil {
 		return true
@@ -198,7 +198,7 @@ func (s *Session) queueOutBytes(data []byte) bool {
 
 	select {
 	case s.send <- data:
-	case <-time.After(time.Microsecond * 50):
+	case <-time.After(time.Microsecond * 500):
 		log.Println("s.queueOutBytes: timeout", s.sid)
 		return false
 	}
