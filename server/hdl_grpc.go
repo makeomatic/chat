@@ -14,10 +14,14 @@ import (
 	"io"
 	"log"
 	"net"
+	"time"
 
 	"github.com/tinode/chat/pbx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/channelz/service"
+	"google.golang.org/grpc/keepalive"
 )
 
 type grpcNodeServer struct {
@@ -121,7 +125,47 @@ func serveGrpc(addr string, tlsConf *tls.Config) (*grpc.Server, error) {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConf)))
 		secure = " secure"
 	}
+	opts = append(opts, grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+		// MinTime is the minimum amount of time a client should wait before sending
+		// a keepalive ping. The current default value is 5 minutes.
+		MinTime:             1 * time.Second,
+
+		// If true, server allows keepalive pings even when there are no active
+		// streams(RPCs). If false, and client sends ping when there are no active
+		// streams, server will send GOAWAY and close the connection. false by default.
+		PermitWithoutStream: true,
+	}))
+
+	opts = append(opts, grpc.KeepaliveParams(keepalive.ServerParameters{
+		// MaxConnectionIdle is a duration for the amount of time after which an
+		// idle connection would be closed by sending a GoAway. Idleness duration is
+		// defined since the most recent time the number of outstanding RPCs became
+		// zero or the connection establishment. The current default value is infinity.
+		// MaxConnectionIdle:     15 * time.Second,
+
+		// MaxConnectionAge is a duration for the maximum amount of time a
+		// connection may exist before it will be closed by sending a GoAway. A
+		// random jitter of +/-10% will be added to MaxConnectionAge to spread out
+		// connection storms. The current default value is infinity.
+		// MaxConnectionAge:      30 * time.Second,
+
+		// MaxConnectionAgeGrace is an additive period after MaxConnectionAge after
+		// which the connection will be forcibly closed. The current default value is infinity.
+		// MaxConnectionAgeGrace: 5 * time.Second,
+
+		// After a duration of this time if the server doesn't see any activity it
+		// pings the client to see if the transport is still alive. // The current default value is 2 hours.
+		Time:                  60 * time.Second,
+
+		// After having pinged for keepalive check, the server waits for a duration
+		// of Timeout and if no activity is seen even after that the connection is
+		// closed. The current default value is 20 seconds.
+		Timeout:               20 * time.Second,
+	}))
+
 	srv := grpc.NewServer(opts...)
+	reflection.Register(srv)
+	service.RegisterChannelzServiceToServer(srv)
 	pbx.RegisterNodeServer(srv, &grpcNodeServer{})
 	log.Printf("gRPC/%s%s server is registered at [%s]", grpc.Version, secure, addr)
 
