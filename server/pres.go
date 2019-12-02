@@ -90,7 +90,7 @@ func (t *Topic) loadContacts(uid types.Uid) error {
 // "+dis" disable subscription withot removing it, the opposite of "en".
 // The "+en/rem/dis" command itself is stripped from the notification.
 func (t *Topic) presProcReq(fromUserID, what string, wantReply bool) string {
-	if t.isSuspended() {
+	if !t.isReady() {
 		return ""
 	}
 
@@ -292,6 +292,17 @@ func (t *Topic) presSubsOnlineDirect(what string) {
 			msg.Pres.Topic = t.original(sess.uid)
 		}
 		sess.queueOut(msg)
+	}
+}
+
+// Communicates "topic unaccessible (cluster rehashing or node connection lost)" event
+// to a list of topics promting the client to resubscribe to the topics.
+func (s *Session) presTermDirect(subs []string) {
+	log.Printf("sid '%s', uid '%s', terminating %s", s.sid, s.uid, subs)
+	msg := &ServerComMessage{Pres: &MsgServerPres{Topic: "me", What: "term"}}
+	for _, topic := range subs {
+		msg.Pres.Src = topic
+		s.queueOut(msg)
 	}
 }
 

@@ -37,7 +37,8 @@ CREATE TABLE usertags(
 	
 	PRIMARY KEY(id),
 	FOREIGN KEY(userid) REFERENCES users(id),
-	INDEX usertags_tag (tag)
+	INDEX usertags_tag(tag),
+	UNIQUE INDEX usertags_userid_tag(userid, tag)
 );
 
 # Indexed devices. Normalized into a separate table.
@@ -101,7 +102,8 @@ CREATE TABLE topictags(
 	
 	PRIMARY KEY(id),
 	FOREIGN KEY(topic) REFERENCES topics(name),
-	INDEX topictags_tag (tag)
+	INDEX topictags_tag (tag),
+	UNIQUE INDEX topictags_userid_tag(topic, tag)
 );
 
 # Subscriptions
@@ -165,8 +167,9 @@ CREATE TABLE dellog(
 # User credentials
 CREATE TABLE credentials(
 	id			INT NOT NULL AUTO_INCREMENT,
-	createdat 	DATETIME(3) NOT NULL,
-	updatedat 	DATETIME(3) NOT NULL,	
+	createdat	DATETIME(3) NOT NULL,
+	updatedat	DATETIME(3) NOT NULL,
+	deletedat	DATETIME(3),
 	method 		VARCHAR(16) NOT NULL,
 	value		VARCHAR(128) NOT NULL,
 	synthetic	VARCHAR(192) NOT NULL,

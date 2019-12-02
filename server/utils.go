@@ -160,21 +160,22 @@ func restrictedTagsEqual(oldTags, newTags []string, namespaces map[string]bool) 
 	return true
 }
 
-// Process credentials for correctness: remove duplicates and unknown methods.
+// Process credentials for correctness: remove duplicate and unknown methods.
+// In case of duplicate methods only the first one satisfying valueRequired is kept.
 // If valueRequired is true, keep only those where Value is non-empty.
-func normalizeCredentials(creds []MsgAccCred, valueRequired bool) []MsgAccCred {
+func normalizeCredentials(creds []MsgCredClient, valueRequired bool) []MsgCredClient {
 	if len(creds) == 0 {
 		return nil
 	}
 
-	index := make(map[string]*MsgAccCred)
+	index := make(map[string]*MsgCredClient)
 	for i := range creds {
 		c := &creds[i]
 		if _, ok := globals.validators[c.Method]; ok && (!valueRequired || c.Value != "") {
 			index[c.Method] = c
 		}
 	}
-	creds = make([]MsgAccCred, 0, len(index))
+	creds = make([]MsgCredClient, 0, len(index))
 	for _, c := range index {
 		creds = append(creds, *index[c.Method])
 	}
@@ -182,7 +183,7 @@ func normalizeCredentials(creds []MsgAccCred, valueRequired bool) []MsgAccCred {
 }
 
 // Get a string slice with methods of credentials.
-func credentialMethods(creds []MsgAccCred) []string {
+func credentialMethods(creds []MsgCredClient) []string {
 	var out []string
 	for i := range creds {
 		out = append(out, creds[i].Method)
@@ -263,8 +264,14 @@ func decodeStoreError(err error, id, topic string, timestamp time.Time,
 			errmsg = ErrPolicy(id, topic, timestamp)
 		case types.ErrCredentials:
 			errmsg = InfoValidateCredentials(id, timestamp)
+		case types.ErrUserNotFound:
+			errmsg = ErrUserNotFound(id, topic, timestamp)
+		case types.ErrTopicNotFound:
+			errmsg = ErrTopicNotFound(id, topic, timestamp)
 		case types.ErrNotFound:
 			errmsg = ErrNotFound(id, topic, timestamp)
+		case types.ErrInvalidResponse:
+			errmsg = ErrInvalidResponse(id, topic, timestamp)
 		default:
 			errmsg = ErrUnknown(id, topic, timestamp)
 		}
@@ -581,6 +588,8 @@ func platformFromUA(ua string) string {
 		return "web"
 	case strings.Contains(ua, "tindroid"):
 		return "android"
+	case strings.Contains(ua, "tinodios"):
+		return "ios"
 	}
 	return ""
 }
@@ -670,7 +679,7 @@ func mergeInterfaces(dst, src interface{}) (interface{}, bool) {
 		if vsrc.String() == nullValue {
 			changed = dst != nil
 			dst = nil
-		} else if src != nil {
+		} else {
 			changed = true
 			dst = src
 		}

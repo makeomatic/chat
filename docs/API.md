@@ -1,29 +1,30 @@
 <!-- TOC depthFrom:1 depthTo:6 withLinks:1 updateOnSave:1 orderedList:0 -->
 
 - [Server API](#server-api)
-	- [How it works?](#how-it-works)
-	- [General considerations](#general-considerations)
-	- [Connecting to the server](#connecting-to-the-server)
+	- [How it Works?](#how-it-works)
+	- [General Considerations](#general-considerations)
+	- [Connecting to the Server](#connecting-to-the-server)
 		- [gRPC](#grpc)
-		- [Websocket](#websocket)
-		- [Long polling](#long-polling)
+		- [WebSocket](#websocket)
+		- [Long Polling](#long-polling)
 		- [Out of Band Large Files](#out-of-band-large-files)
 	- [Users](#users)
 		- [Authentication](#authentication)
 			- [Creating an Account](#creating-an-account)
 			- [Logging in](#logging-in)
 			- [Changing Authentication Parameters](#changing-authentication-parameters)
-			- [Resetting a Password](#resetting-a-password)
-		- [Credentials](#credentials)
-		- [Access control](#access-control)
+			- [Resetting a Password, i.e. "Forgot Password"](#resetting-a-password-ie-forgot-password)
+		- [Credential Validation](#credential-validation)
+		- [Access Control](#access-control)
 	- [Topics](#topics)
-		- [`me` topic](#me-topic)
+		- [`me` Topic](#me-topic)
 		- [`fnd` and Tags: Finding Users and Topics](#fnd-and-tags-finding-users-and-topics)
-			- [Query language](#query-language)
-			- [Incremental updates to queries](#incremental-updates-to-queries)
-			- [Possible use cases](#possible-use-cases)
+			- [Query Language](#query-language)
+			- [Incremental Updates to Queries](#incremental-updates-to-queries)
+			- [Possible Use Cases](#possible-use-cases)
 		- [Peer to Peer Topics](#peer-to-peer-topics)
 		- [Group Topics](#group-topics)
+		- [`sys` Topic](#sys-topic)
 	- [Using Server-Issued Message IDs](#using-server-issued-message-ids)
 	- [User Agent and Presence Notifications](#user-agent-and-presence-notifications)
 	- [Push Notifications Support](#push-notifications-support)
@@ -34,8 +35,9 @@
 	- [Out-of-Band Handling of Large Files](#out-of-band-handling-of-large-files)
 		- [Uploading](#uploading)
 		- [Downloading](#downloading)
+	- [Push Notifications](#push-notifications)
 	- [Messages](#messages)
-		- [Client to server messages](#client-to-server-messages)
+		- [Client to Server Messages](#client-to-server-messages)
 			- [`{hi}`](#hi)
 			- [`{acc}`](#acc)
 			- [`{login}`](#login)
@@ -46,7 +48,7 @@
 			- [`{set}`](#set)
 			- [`{del}`](#del)
 			- [`{note}`](#note)
-		- [Server to client messages](#server-to-client-messages)
+		- [Server to Client Messages](#server-to-client-messages)
 			- [`{data}`](#data)
 			- [`{ctrl}`](#ctrl)
 			- [`{meta}`](#meta)
@@ -57,7 +59,7 @@
 
 # Server API
 
-## How it works?
+## How it Works?
 
 Tinode is an IM router and a store. Conceptually it loosely follows a publish-subscribe model.
 
@@ -85,7 +87,7 @@ Changes to topic metadata, such as changes in topic description, or when other u
 
 When user's `me` topic comes online (i.e. an authenticated session attaches to `me` topic), a `{pres}` packet is sent to `me` topics of all other users, who have peer to peer subscriptions with the first user.
 
-## General considerations
+## General Considerations
 
 Timestamps are always represented as [RFC 3339](http://tools.ietf.org/html/rfc3339)-formatted string with precision up to milliseconds and timezone always set to UTC, e.g. `"2015-10-06T18:07:29.841Z"`.
 
@@ -95,7 +97,7 @@ The `{data}` packets have server-issued sequential IDs: base-10 numbers starting
 
 In order to connect requests to responses, client may assign message IDs to all packets set to the server. These IDs are strings defined by the client. Client should make them unique at least per session. The client-assigned IDs are not interpreted by the server, they are returned to the client as is.
 
-## Connecting to the server
+## Connecting to the Server
 
 There are three ways to access the server over the network: websocket, long polling, and [gRPC](https://grpc.io/).
 
@@ -123,7 +125,7 @@ See definition of the gRPC API in the [proto file](../pbx/model.proto). gRPC API
 
 Messages are sent in text frames, one message per frame. Binary frames are reserved for future use. By default server allows connections with any value in the `Origin` header.
 
-### Long polling
+### Long Polling
 
 Long polling works over `HTTP POST` (preferred) or `GET`. In response to client's very first request server sends a `{ctrl}` message containing `sid` (session ID) in `params`. Long polling client must include `sid` in every subsequent request either in the URL or in the request body.
 
@@ -195,30 +197,44 @@ User may change authentication parameters, such as changing login and password, 
 ```js
 acc: {
   id: "1a2b3", // string, client-provided message id, optional
-	user: "usr2il9suCbuko", // user, who is being affected by the change, optional
-	token: "XMg...g1Gp8+BO0=", // authentication token if the session is not yet authenticated, optional.
+  user: "usr2il9suCbuko", // user being affected by the change, optional
+  token: "XMg...g1Gp8+BO0=", // authentication token if the session
+                             // is not yet authenticated, optional.
   scheme: "basic", // authentication scheme being updated.
-  secret: btoa("new_username:new_password") // new parameters
+  secret: base64encode("new_username:new_password") // new parameters
 }
 ```
-In order to change just the password, `username` should be left empty, i.e. `secret: btoa(":new_password")`.
+In order to change just the password, `username` should be left empty, i.e. `secret: base64encode(":new_password")`.
 
 If the session is not authenticated, the request must include a `token`. It can be a regular authentication token obtained during login, or a restricted token received through [Resetting a Password](#resetting-a-password) process. If the session is authenticated, the token must not be included. If the request is authenticated for access level `ROOT`, then the `user` may be set to a valid ID of another user. Otherwise it must be blank (defaulting to the current user) or equal to the ID of the current user.
 
 
-#### Resetting a Password
+#### Resetting a Password, i.e. "Forgot Password"
 
-To reset a password (or any other authentication secret, if such action is supported by the authenticator), one sends a `{login}` message with the `scheme` set to `reset` and the `secret` containing a base64-encoded string "`authentication scheme to reset secret for`:`reset method`:`reset method value`". Most basic case of resetting a password by email is `secret: btoa("basic:email:jdoe@example.com")`, where `jdoe@example.com` is an earlier validated user's email.
+To reset login or password, (or any other authentication secret, if such action is supported by the authenticator), one sends a `{login}` message with the `scheme` set to `reset` and the `secret` containing a base64-encoded string "`authentication scheme to reset secret for`:`reset method`:`reset method value`". Most basic case of resetting a password by email is
+```js
+login: {
+  id: "1a2b3",
+  scheme: "reset",
+  secret: base64encode("basic:email:jdoe@example.com")
+}
+```
+where `jdoe@example.com` is an earlier validated user's email.
 
-If the email matches the registration, the server will send a message using specified method an address with instructions for resetting the secret. The email contains a restricted security token which the user can include into an `{acc}` request with the new secret as described in [Changing Authentication Parameters](#changing-authentication-parameters).
+If the email matches the registration, the server will send a message using specified method and address with instructions for resetting the secret. The email contains a restricted security token which the user can include into an `{acc}` request with the new secret as described in [Changing Authentication Parameters](#changing-authentication-parameters).
 
-### Credentials
+### Credential Validation
 
-Server may be optionally configured to require certain credentials associated with the user accounts. For instance, it's possible to require user to provide a unique email or a phone number as a condition of account registration, or to solve a captcha.
+Server may be optionally configured to require validation of certain credentials associated with the user accounts and authentication scheme. For instance, it's possible to require user to provide a unique email or a phone number, or to solve a captcha as a condition of account registration.
 
-The server supports verification of email and phone numbers out of the box. Verification of emails is mostly functional, verification of phone numbers is not functional because a commercial subscription is needed in order to be able to send SMS.
+The server supports verification of email out of the box with just a configuration change. is mostly functional, verification of phone numbers is not functional because a commercial subscription is needed in order to be able to send text messages (SMS).
 
-### Access control
+If certain credentials are required, then user must maintain them in validated state at all times. It means if a required credential has to be changed, the user must first add and validate the new credential and only then remove the old one.
+
+Credentials are initially assigned at registration time by sending an `{acc}` message, added using `{set topic="me"}`, deleted using `{del topic="me"}`, and queries by `{get topic="me"}` messages. Credentials are verified by the client by sending either a `{login}` or an `{acc}` message.
+
+
+### Access Control
 
 Access control manages user's access to topics through access control lists (ACLs) or bearer tokens (_bearer tokens are not implemented as of version 0.15_).
 
@@ -238,7 +254,7 @@ User's access to a topic is defined by two sets of permissions: user's desired p
 
 Topic's default access is established at the topic creation time by `{sub.desc.defacs}` and can be subsequently modified by `{set}` messages. Default access is defined for two categories of users: authenticated and anonymous. This value is applied as a default "given" permission to all new subscriptions.
 
-Client may replace explicit permissions in `{sub}` and `{set}` messages with an empty string to tell Tinode to use default permissions. If client specifies no default access permissions at topic creation time, authenticated users will receive a `RWP` permission, anonymous users will receive and empty permission which means every subscription request must be explicitly approved by the topic manager.
+Client may replace explicit permissions in `{sub}` and `{set}` messages with an empty string to tell Tinode to use default permissions. If client specifies no default access permissions at topic creation time, authenticated users will receive a `RWP` permission, anonymous users will receive an empty permission which means every subscription request must be explicitly approved by the topic manager.
 
 Access permissions can be assigned on a per-user basis by `{set}` messages.
 
@@ -261,11 +277,11 @@ User-dependent topic properties:
  * given: access permissions given to this user
 * private: an application-defined object that is unique to the current user.
 
-Topic usually have subscribers. One the the subscribers may be designated as topic owner (`O` access permission) with full access permissions. The list of subscribers can be queries with a `{get what="sub"}` message. The list of subscribers is returned in a `sub` section of a `{meta}` message.
+Topic usually have subscribers. One of the subscribers may be designated as topic owner (`O` access permission) with full access permissions. The list of subscribers can be queries with a `{get what="sub"}` message. The list of subscribers is returned in a `sub` section of a `{meta}` message.
 
-### `me` topic
+### `me` Topic
 
-Topic `me` is automatically created for every user at the account creation time. It serves as means for account updates, receiving presence notification from people and topics of interest, invites to join topics, requests to approve subscription for topics where this user is a manager (has `S` permission). Topic `me` has no owner. The topic cannot be deleted or unsubscribed from. One can leave the topic which will stop all relevant communication and indicate that the user is offline (although the user may still be logged in and may continue to use other topics).
+Topic `me` is automatically created for every user at the account creation time. It serves as means of managing account information, receiving presence notification from people and topics of interest. Topic `me` has no owner. The topic cannot be deleted or unsubscribed from. One can `leave` the topic which will stop all relevant communication and indicate that the user is offline (although the user may still be logged in and may continue to use other topics).
 
 Joining or leaving `me` generates a `{pres}` presence update sent to all users who have peer to peer topics with the given user and `P` permissions set.
 
@@ -275,8 +291,8 @@ Message `{get what="desc"}` to `me` is automatically replied with a `{meta}` mes
 
 Message `{get what="sub"}` to `me` is different from any other topic as it returns the list of topics that the current user is subscribed to as opposite to the expected user's subscription to `me`.
 * seq: server-issued numeric id of the last message in the topic
-* read: seq value self-reported by the current user as received
-* recv: seq value self-reported by the current user as read
+* recv: seq value self-reported by the current user as received
+* read: seq value self-reported by the current user as read
 * seen: for P2P subscriptions, timestamp of user's last presence and User Agent string are reported
  * when: timestamp when the user was last online
  * ua: user agent string of the user's client software last used
@@ -303,7 +319,7 @@ Topic `fnd` is read-only. `{pub}` messages to `fnd` are rejected.
 
 [Plugins](../pbx) support `Find` service which can be used to replace default search with a custom one.
 
-#### Query language
+#### Query Language
 
 Tinode query language is used to define search queries for finding users and topics. The query is a string containing tags separated by spaces or commas. Tags are strings - individual query terms which are matched against user's or topic's tags. The tags can be written in an RTL language but the query as a whole is parsed left to right. Spaces are treated as the `AND` operator, commas (as well as commas preceded and/or followed by a space) as the `OR` operator. The order of operators is ignored: all `AND` tags are grouped together, all `OR` tags are grouped together. `OR` takes precedence over `AND`: if a tag is preceded of followed by a comma, it's an `OR` tag, otherwise an `AND`. For example, `a AND b OR c` is rewritten as `(b OR c) AND a`.
 
@@ -316,13 +332,13 @@ Tags containing spaces or commas must be enclosed in double quotes (`"`, `\u0022
 * `flowers travel, puppies`: find topics or users which contain `flowers` and either `travel` or `puppies`, i.e. `(travel OR puppies) AND flowers`.
 * `flowers, travel puppies, kittens`: find topics or users which contain either one of `flowers`, `travel`, `puppies`, or `kittens`, i.e. `flowers OR travel OR puppies OR kittens`. The space between `travel` and `puppies` is treated as `OR` due to `OR` taking precedence over `AND`.
 
-#### Incremental updates to queries
+#### Incremental Updates to Queries
 
 Queries, particularly `fnd.private` could be arbitrarily large, limited only by the message size and by the underlying database. Instead of rewriting the entire query to add or remove a tag, tag can be added or removed incrementally.
 
 The incremental update request is processed left to right. It may contain the same tag multiple times, i.e. `-tag+tag` is a valid request.
 
-#### Possible use cases
+#### Possible Use Cases
 * Restricting users to organisations.
   An immutable tag(s) may be assigned to the user which denotes the organisation the user belongs to. When the user searches for other users or topics, the search can be restricted to always contain the tag. This approach can be used to segment users into organisations with limited visibility into each other.
 
@@ -351,6 +367,9 @@ A group topic is created by sending a `{sub}` message with the topic field set t
 
 A user joining or leaving the topic generates a `{pres}` message to all other users who are currently in the joined state with the topic.
 
+### `sys` Topic
+
+The `sys` topic serves as an always available channel of communication with the system administrators. A normal non-root user cannot subscribe to `sys` but can publish to it without subscription. Existing clients use this channel to report abuse by sending a Drafty-formatted `{pub}` message with the report as JSON attachment. A root user can subscribe to `sys` topic. Once subscribed, the root user will receive messages sent to `sys` topic by other users.
 
 ## Using Server-Issued Message IDs
 
@@ -475,33 +494,33 @@ The `ctrl.params.url` contains the path to the uploaded file at the current serv
 
 Once the URL of the file is received, either immediately or after following the redirect, the client may use the URL to send a `{pub}` message with the uploaded file as an attachment. The URL should be used to produce a [Drafty](./drafty.md)-formatted `pub.content` field and also should be referenced in the `pub.head.attachments`:
 
-```js:
+```js
 pub: {
   id: "121103",
   topic: "grpnG99YhENiQU",
   head: {
     attachments: ["/v0/file/s/sJOD_tZDPz0.jpg"],
-	  mime: "text/x-drafty"
+    mime: "text/x-drafty"
   },
   content: {
     ent: [
-	  {
-	    data: {
-		  mime: "image/jpeg",
-		  name: "roses-are-red.jpg",
-		  ref:  "/v0/file/s/sJOD_tZDPz0.jpg",
-		  size: 437265
-		},
-	    tp: "EX"
-	  }
-	],
-	fmt: [
-	  {
-	    at: -1,
-		key:0,
-		len:1
-	  }
-	]
+    {
+      data: {
+      mime: "image/jpeg",
+      name: "roses-are-red.jpg",
+      ref:  "/v0/file/s/sJOD_tZDPz0.jpg",
+      size: 437265
+    },
+      tp: "EX"
+    }
+  ],
+  fmt: [
+    {
+      at: -1,
+    key:0,
+    len:1
+    }
+  ]
   }
 }
 ```
@@ -514,24 +533,40 @@ The serving endpoint `/v0/file/s` serves files in response to HTTP GET requests.
 
 _Important!_ As a security measure, the client should not send security credentials if the download URL is absolute and leads to another server.
 
+## Push Notifications
+
+Tinode uses compile-time adapters for handling push notifications. The server comes with [Google FCM](https://firebase.google.com/docs/cloud-messaging/) and `stdout` adapters. FCM supports all major mobile platforms except Chinese flavor of Android. Any type of push notifications can be handled by writing an appropriate adapter. The payload of the notification from the FCM adapter is the following:
+```js
+{
+  topic: "grpnG99YhENiQU", // Topic which received the message.
+  xfrom: "usr2il9suCbuko", // ID of the user who sent the message.
+  ts: "2019-01-06T18:07:30.038Z", // message timestamp in RFC3339 format.
+  seq: "1234", // sequential ID of the message (integer value sent as text).
+  mime: "text/x-drafty", // message MIME-Type.
+  content: "Lorem ipsum dolor sit amet, consectetur adipisci", // The first 80 characters of the message content as plain text.
+}
+```
+
 ## Messages
 
 A message is a logically associated set of data. Messages are passed as JSON-formatted UTF-8 text.
 
-All client to server messages may have an optional `id` field. It's set by the client as means to receive an acknowledgement from the server that the message was received and processed. The `id` is expected to be a session-unique string but it can be any string. The server does not attempt to interpret it other than to check JSON validity. It's returned unchanged by the server when it replies to client messages.
+All client to server messages may have an optional `id` field. It's set by the client as means to receive an acknowledgement from the server that the message was received and processed. The `id` is expected to be a session-unique string but it can be any string. The server does not attempt to interpret it other than to check JSON validity. The `id` is returned unchanged by the server when it replies to the client message.
 
-Server requires strictly valid JSON, including double quotes around field names. For brevity the notation below omits double quotes around field names as well as outer curly brackets.
+Server requires strictly valid JSON, including double quotes around field names. For brevity the notation below omits double quotes around field names as well as outer curly brackets. Examples use `//` comments only for expressiveness. The comments cannot be used in actual communication with the server.
 
 For messages that update application-defined data, such as `{set}` `private` or `public` fields, when server-side
-data needs to be cleared, use a string with a single Unicode DEL character "&#x2421;" `"\u2421"`. I.e. sending `"public": null` will not clear the field, but sending `"public": "\u2421"` will.
+data needs to be cleared, use a string with a single Unicode DEL character "&#x2421;" (`\u2421`). I.e. sending `"public": null` will not clear the field, but sending `"public": "␡"` will.
 
-### Client to server messages
+Any unrecognized fields are silently ignored by the server.
+
+### Client to Server Messages
 
 #### `{hi}`
 
 Handshake message client uses to inform the server of its version and user agent. This message must be the first that
-the client sends to the server. Server responds with a `{ctrl}` which contains server build `build`, wire protocol version `ver`, and
-session ID `sid` in case of long polling, all in `ctrl.params`.
+the client sends to the server. Server responds with a `{ctrl}` which contains server build `build`, wire protocol version `ver`,
+session ID `sid` in case of long polling, as well as server constraints, all in `ctrl.params`.
 
 ```js
 hi: {
@@ -545,7 +580,7 @@ hi: {
                    // see [Push notifications support](#push-notifications-support); optional
   platf: "android", // string, underlying OS for the purpose of push notifications, one of
                    // "android", "ios", "web"; if missing, the server will try its best to
-                   // detect the platform; optional
+                   // detect the platform from the user agent string; optional
   lang: "en-US"    // human language of the client device; optional
 }
 ```
@@ -559,11 +594,11 @@ Message `{acc}` creates users or updates `tags` or authentication credentials `s
 acc: {
   id: "1a2b3", // string, client-provided message id, optional
   user: "new", // string, "new" to create a new user, default: current user, optional
-	token: "XMgS...8+BO0=", // string, authentication token to use for the request if the
-							// session is not authenticated, optional
+  token: "XMgS...8+BO0=", // string, authentication token to use for the request if the
+               // session is not authenticated, optional
   scheme: "basic", // authentication scheme for this account, required;
                // "basic" and "anon" are currently supported for account creation.
-  secret: btoa("username:password"), // string, base64 encoded secret for the chosen
+  secret: base64encode("username:password"), // string, base64 encoded secret for the chosen
               // authentication scheme; to delete a scheme use a string with a single DEL
               // Unicode character "\u2421"; "token" and "basic" cannot be deleted
   login: true, // boolean, use the newly created account to authenticate current session,
@@ -571,15 +606,15 @@ acc: {
   tags: ["alice johnson",... ], // array of tags for user discovery; see 'fnd' topic for
               // details, optional (if missing, user will not be discoverable other than
               // by login)
-  cred: [
+  cred: [  // account credentials which require verification, such as email or phone number.
     {
       meth: "email", // string, verification method, e.g. "email", "tel", "recaptcha", etc.
       val: "alice@example.com", // string, credential to verify such as email or phone
       resp: "178307", // string, verification response, optional
       params: { ... } // parameters, specific to the verification method, optional
     },
-	...
-  ],   // account credentials which require verification, such as email or phone number.
+  ...
+  ],
 
   desc: {  // object, user initialisation data closely matching that of table
            // initialisation; optional
@@ -610,15 +645,15 @@ Login is used to authenticate the current session.
 login: {
   id: "1a2b3",     // string, client-provided message id, optional
   scheme: "basic", // string, authentication scheme; "basic",
-									 // "token", and "reset" are currently supported
-  secret: btoa("username:password"), // string, base64-encoded secret for the chosen
+                   // "token", and "reset" are currently supported
+  secret: base64encode("username:password"), // string, base64-encoded secret for the chosen
                   // authentication scheme, required
   cred: [
     {
       meth: "email", // string, verification method, e.g. "email", "tel", "captcha", etc, required
       resp: "178307" // string, verification response, required
     },
-	...
+  ...
   ],   // response to a request for credential verification, optional
 }
 ```
@@ -656,7 +691,7 @@ sub: {
   // Object with topic initialisation data, new topics & new
   // subscriptions only, mirrors {set} message
   set: {
-	// New topic parameters, mirrors {set desc}
+  // New topic parameters, mirrors {set desc}
     desc: {
       defacs: {
         auth: "JRWS", // string, default access for new authenticated subscribers
@@ -673,10 +708,16 @@ sub: {
                    // default: server-defined
     }, // object, optional
 
-    // Optional update to tags (see fnd topic description)
-    tags: [ // array of strings
+    tags: [ // array of strings, update to tags (see fnd topic description), optional.
         "email:alice@example.com", "tel:1234567890"
-    ]
+    ],
+
+    cred: { // update to credentials, optional.
+      meth: "email", // string, verification method, e.g. "email", "tel", "recaptcha", etc.
+      val: "alice@example.com", // string, credential to verify such as email or phone
+      resp: "178307", // string, verification response, optional
+      params: { ... } // parameters, specific to the verification method, optional
+    }
   },
 
   get: {
@@ -698,19 +739,19 @@ sub: {
       ims: "2015-10-06T18:07:30.038Z", // timestamp, "if modified since" - return
               // public and private values only if at least one of them has been
               // updated after the stated timestamp, optional
-	  user: "usr2il9suCbuko", // string, return results for a single user,
-	                          // any topic other than 'me', optional
-	  topic: "usr2il9suCbuko", // string, return results for a single topic,
-	                          // 'me' topic only, optional
+    user: "usr2il9suCbuko", // string, return results for a single user,
+                            // any topic other than 'me', optional
+    topic: "usr2il9suCbuko", // string, return results for a single topic,
+                            // 'me' topic only, optional
       limit: 20 // integer, limit the number of returned objects
     },
 
     // Optional parameters for {get what="data"}, see {get what="data"} for details
     data: {
       since: 123, // integer, load messages with server-issued IDs greater or equal
-  				 // to this (inclusive/closed), optional
+            // to this (inclusive/closed), optional
       before: 321, // integer, load messages with server-issued sequential IDs less
-  				  // than this (exclusive/open), optional
+            // than this (exclusive/open), optional
       limit: 20, // integer, limit the number of returned objects,
                  // default: 32, optional
     } // object, optional
@@ -765,10 +806,11 @@ The following values are currently defined for the `head` field:
  * `hashtags`: an array of hashtags in the message without the leading `#` symbol: `["onehash", "twohash"]`.
  * `mentions`: an array of user IDs mentioned (`@alice`) in the message: `["usr1XUtEhjv6HND", "usr2il9suCbuko"]`.
  * `mime`: MIME-type of the message content, `"text/x-drafty"`; a `null` or a missing value is interpreted as `"text/plain"`.
+ * `priority`: message display priority: hint for the client that the message should be displayed more prominently for a set period of time; only `"high"` is currently defined; `{"level": "high", "expires": "2019-10-06T18:07:30.038Z"}`; `priority` can be set by the topic owner or administrator (`A` permission) only. The `"expires"` qualifier is optional.
  * `replace`: an indicator that the message is a correction/replacement for another message, a topic-unique ID of the message being updated/replaced, `":123"`
  * `reply`: an indicator that the message is a reply to another message, a unique ID of the original message, `"grp1XUtEhjv6HND:123"`.
  * `sender`: a user ID of the sender added by the server when the message is sent by on behalf of another user, `"usr1XUtEhjv6HND"`.
- * `thread`: an indicator that the message is a part of a conversation thread, a unique ID of the first message in the thread, `"grp1XUtEhjv6HND:123"`.
+ * `thread`: an indicator that the message is a part of a conversation thread, a topic-unique ID of the first message in the thread, `":123"`; `thread` is intended for tagging a flat list of messages as opposite to a creating a tree.
 
 Application-specific fields should start with an `x-<application-name>-`. Although the server does not enforce this rule yet, it may start doing so in the future.
 
@@ -782,8 +824,8 @@ Query topic for metadata, such as description or a list of subscribers, or query
 get: {
   id: "1a2b3", // string, client-provided message id, optional
   topic: "grp1XUtEhjv6HND", // string, name of topic to request data from
-  what: "sub desc data del", // string, space-separated list of parameters to query;
-                        // unknown strings are ignored; required
+  what: "sub desc data del cred", // string, space-separated list of parameters to query;
+                        // unknown values are ignored; required
 
   // Optional parameters for {get what="desc"}
   desc: {
@@ -797,19 +839,19 @@ get: {
     ims: "2015-10-06T18:07:30.038Z", // timestamp, "if modified since" - return
           // public and private values only if at least one of them has been
           // updated after the stated timestamp, optional
-	user: "usr2il9suCbuko", // string, return results for a single user,
-	                        // any topic other than 'me', optional
-	topic: "usr2il9suCbuko", // string, return results for a single topic,
-	                         // 'me' topic only, optional
+    user: "usr2il9suCbuko", // string, return results for a single user,
+                          // any topic other than 'me', optional
+    topic: "usr2il9suCbuko", // string, return results for a single topic,
+                           // 'me' topic only, optional
     limit: 20 // integer, limit the number of returned objects
   },
 
   // Optional parameters for {get what="data"}
   data: {
     since: 123, // integer, load messages with server-issued IDs greater or equal
-				 // to this (inclusive/closed), optional
+                // to this (inclusive/closed), optional
     before: 321, // integer, load messages with server-issed sequential IDs less
-				  // than this (exclusive/open), optional
+               // than this (exclusive/open), optional
     limit: 20, // integer, limit the number of returned objects, default: 32,
                // optional
   },
@@ -817,9 +859,9 @@ get: {
   // Optional parameters for {get what="del"}
   del: {
     since: 5, // integer, load deleted ranges with the delete transaction IDs greater
-				// or equal to this (inclusive/closed), optional
+              // or equal to this (inclusive/closed), optional
     before: 12, // integer, load deleted ranges with the delete transaction IDs less
-				  // than this (exclusive/open), optional
+                // than this (exclusive/open), optional
     limit: 25, // integer, limit the number of returned objects, default: 32,
                // optional
   }
@@ -853,6 +895,9 @@ Query message deletion history. Server responds with a `{meta}` message containi
 
 See [Public and Private Fields](#public-and-private-fields) for `private` and `public` format considerations.
 
+* `{get what="cred"}`
+
+Query [credentials](#credentail-validation). Server responds with a `{meta}` message containing an array of credentials. Supported for `me` topic only.
 
 #### `{set}`
 
@@ -878,13 +923,20 @@ set: {
     user: "usr2il9suCbuko", // string, user affected by this request;
                             // default (empty) means current user
     mode: "JRWP" // string, access mode change, either given ('user'
-				  // is defined) or requested ('user' undefined)
+                 // is defined) or requested ('user' undefined)
   }, // object, payload for what == "sub"
 
   // Optional update to tags (see fnd topic description)
   tags: [ // array of strings
     "email:alice@example.com", "tel:1234567890"
-  ]
+  ],
+
+  cred: { // Optional update to credentials.
+    meth: "email", // string, verification method, e.g. "email", "tel", "recaptcha", etc.
+    val: "alice@example.com", // string, credential to verify such as email or phone
+    resp: "178307", // string, verification response, optional
+    params: { ... } // parameters, specific to the verification method, optional
+  }
 }
 ```
 
@@ -897,9 +949,9 @@ del: {
   id: "1a2b3", // string, client-provided message id, optional
   topic: "grp1XUtEhjv6HND", // string, topic affected, required for "topic", "sub",
                // "msg"
-  what: "msg", // string, one of "topic", "sub", "msg", "user"; what to delete - the
-               // entire topic, a subscription, some or all messages, a user;
-               // optional, default: "msg"
+  what: "msg", // string, one of "topic", "sub", "msg", "user", "cred"; what
+               // to delete - the entire topic, a subscription, some or all messages,
+               // a user, a credential; optional, default: "msg"
   hard: false, // boolean, request to hard-delete vs mark as deleted; in case of
                // what="msg" delete for all users vs current user only;
                // optional, default: false
@@ -907,6 +959,10 @@ del: {
                // to delete, inclusive-exclusive, i.e. [low, hi), optional
   user: "usr2il9suCbuko" // string, user being deleted (what="user") or whose
                // subscription is being deleted (what="sub"), optional
+  cred: { // credential to delete ('me' topic only).
+    meth: "email", // string, verification method, e.g. "email", "tel", etc.
+    val: "alice@example.com" // string, credential being deleted
+  }
 }
 ```
 
@@ -926,6 +982,10 @@ Deleting a topic deletes the topic including all subscriptions, and all messages
 
 Deleting a user is a very heavy operation. Use caution.
 
+`what="cred"`
+
+Delete credential. Validated credentials and those with no attempts at validation are hard-deleted. Credentials with failed attempts at validation are soft-deleted which prevents their reuse by the same user.
+
 
 #### `{note}`
 
@@ -938,17 +998,24 @@ note: {
   what: "kp", // string, one of "kp" (key press), "read" (read notification),
               // "rcpt" (received notification), any other string will cause
               // message to be silently ignored, required
-  seq: 123, // integer, ID of the message being acknowledged, required for
-            // rcpt & read
+  seq: 123,   // integer, ID of the message being acknowledged, required for
+              // rcpt & read
+  unread: 10  // integer, client-reported total count of unread messages, optional.
 }
 ```
 
 The following actions are currently recognised:
  * kp: key press, i.e. a typing notification. The client should use it to indicate that the user is composing a new message.
- * recv: a `{data}` message is received by the client software but not yet seen by user.
+ * recv: a `{data}` message is received by the client software but may not yet seen by user.
  * read: a `{data}` message is seen by the user. It implies `recv` as well.
 
-### Server to client messages
+The `read` and `recv` notifications may optionally include `unread` value which is the total count of unread messages as determined by this client. The per-user `unread` count is maintained by the server: it's incremented when new `{data}` messages are sent to user and reset to the values reported by the `{note unread=...}` message. The `unread` value is never decremented by the server. The value is included in push notifications to be shown on a badge on iOS:
+<p align="center">
+  <img src="./ios-pill-128.png" alt="Tinode iOS icon with a pill counter" width=64 height=64 />
+</p>
+
+
+### Server to Client Messages
 
 Messages to a session generated in response to a specific request contain an `id` field equal to the id of the
 originating message. The `id` is not interpreted by the server.
@@ -968,7 +1035,7 @@ data: {
                           // message; could be missing if the message was
                           // generated by the server
   head: { key: "value", ... }, // set of string key-value pairs, passed
-						   // unchanged from {pub}, optional
+                               // unchanged from {pub}, optional
   ts: "2015-10-06T18:07:30.038Z", // string, timestamp
   seq: 123, // integer, server-issued sequential ID
   content: { ... } // object, application-defined content exactly as published
@@ -1022,7 +1089,7 @@ meta: {
     acs: {  // user's actual access permissions
       want: "JRWP", // string, requested access permission
       given: "JRWP", // string, granted access permission
-	  mode: "JRWP" // string, combination of want and given
+    mode: "JRWP" // string, combination of want and given
     },
     seq: 123, // integer, server-issued id of the last {data} message
     read: 112, // integer, ID of the message user claims through {note} message
@@ -1047,9 +1114,9 @@ meta: {
                                            // in the future, such as new subscribers)
       acs: {  // user's access permissions
         want: "JRWP", // string, requested access permission, present for user's own
-					 // subscriptions and when the requester is topic's manager or owner
+              // subscriptions and when the requester is topic's manager or owner
         given: "JRWP", // string, granted access permission, optional exactly as 'want'
-	    mode: "JRWP" // string, combination of want and given
+        mode: "JRWP" // string, combination of want and given
       },
       read: 112, // integer, ID of the message user claims through {note} message
                  // to have read, optional
@@ -1086,11 +1153,19 @@ meta: {
     ...
   ],
   tags: [ // array of tags that the topic or user (in case of "me" topic) is indexed by
-	"email:alice@example.com", "tel:1234567890"
+    "email:alice@example.com", "tel:+1234567890"
+  ],
+  cred: [ // array of user's credentials
+    {
+      meth: "email", // string, validation method
+      val: "alice@example.com", // string, credential value
+      done: true     // validation status
+    },
+    ...
   ],
   del: {
-	clear: 3, // ID of the latest applicable 'delete' transaction
-	delseq: [{low: 15}, {low: 22, hi: 28}, ...], // ranges of IDs of deleted messages
+    clear: 3, // ID of the latest applicable 'delete' transaction
+    delseq: [{low: 15}, {low: 22, hi: 28}, ...], // ranges of IDs of deleted messages
   }
 }
 ```
@@ -1105,16 +1180,16 @@ pres: {
   src: "grp1XUtEhjv6HND", // string, topic or user affected by the change, always present
   what: "on", // string, what's changed, always present
   seq: 123, // integer, "what" is "msg", a server-issued ID of the message,
-           // optional
+            // optional
   clear: 15, // integer, "what" is "del", an update to the delete transaction ID.
   delseq: [{low: 123}, {low: 126, hi: 136}], // array of ranges, "what" is "del",
-			// ranges of IDs of deleted messages, optional
+             // ranges of IDs of deleted messages, optional
   ua: "Tinode/1.0 (Android 2.2)", // string, a User Agent string identifying client
-						// software if "what" is "on" or "ua", optional
-  act: "usr2il9suCbuko",	// string, user who performed the action, optional
-  tgt: "usrRkDVe0PYDOo", 	// string, user affected by the action, optional
+             // software if "what" is "on" or "ua", optional
+  act: "usr2il9suCbuko",  // string, user who performed the action, optional
+  tgt: "usrRkDVe0PYDOo",  // string, user affected by the action, optional
   acs: {want: "+AS-D", given: "+S"} // object, changes to access mode, "what" is "acs",
-			// optional
+                          // optional
 }
 ```
 

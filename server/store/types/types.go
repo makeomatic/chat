@@ -22,26 +22,32 @@ func (s StoreError) Error() string {
 }
 
 const (
-	// ErrInternal means DB or other internal failure
+	// ErrInternal means DB or other internal failure.
 	ErrInternal = StoreError("internal")
-	// ErrMalformed means the secret cannot be parsed or otherwise wrong
+	// ErrMalformed means the secret cannot be parsed or otherwise wrong.
 	ErrMalformed = StoreError("malformed")
-	// ErrFailed means authentication failed (wrong login or password, etc)
+	// ErrFailed means authentication failed (wrong login or password, etc).
 	ErrFailed = StoreError("failed")
-	// ErrDuplicate means duplicate credential, i.e. non-unique login
+	// ErrDuplicate means duplicate credential, i.e. non-unique login.
 	ErrDuplicate = StoreError("duplicate value")
-	// ErrUnsupported means an operation is not supported
+	// ErrUnsupported means an operation is not supported.
 	ErrUnsupported = StoreError("unsupported")
-	// ErrExpired means the secret has expired
+	// ErrExpired means the secret has expired.
 	ErrExpired = StoreError("expired")
 	// ErrPolicy means policy violation, e.g. password too weak.
 	ErrPolicy = StoreError("policy")
-	// ErrCredentials means credentials like email or captcha must be validated
+	// ErrCredentials means credentials like email or captcha must be validated.
 	ErrCredentials = StoreError("credentials")
-	// ErrNotFound means the objevy was not found
+	// ErrUserNotFound means the user was not found.
+	ErrUserNotFound = StoreError("user not found")
+	// ErrTopicNotFound means the topic was not found.
+	ErrTopicNotFound = StoreError("topic not found")
+	// ErrNotFound means the object other then user or topic was not found.
 	ErrNotFound = StoreError("not found")
-	// ErrPermissionDenied means the operation is not permitted
+	// ErrPermissionDenied means the operation is not permitted.
 	ErrPermissionDenied = StoreError("denied")
+	// ErrInvalidResponse means the client's response does not match server's expectation.
+	ErrInvalidResponse = StoreError("invalid response")
 )
 
 // Uid is a database-specific record id, suitable to be used as a primary key.
@@ -49,6 +55,9 @@ type Uid uint64
 
 // ZeroUid is a constant representing uninitialized Uid.
 const ZeroUid Uid = 0
+
+// NullValue is a Unicode DEL character which indicated that the value is being deleted.
+const NullValue = "\u2421"
 
 // Lengths of various Uid representations
 const (
@@ -72,9 +81,9 @@ func (uid Uid) Compare(u2 Uid) int {
 }
 
 // MarshalBinary converts Uid to byte slice.
-func (uid *Uid) MarshalBinary() ([]byte, error) {
+func (uid Uid) MarshalBinary() ([]byte, error) {
 	dst := make([]byte, 8)
-	binary.LittleEndian.PutUint64(dst, uint64(*uid))
+	binary.LittleEndian.PutUint64(dst, uint64(uid))
 	return dst, nil
 }
 
@@ -349,6 +358,9 @@ type StringSlice []string
 
 // Scan implements sql.Scanner interface.
 func (ss *StringSlice) Scan(val interface{}) error {
+	if val == nil {
+		return nil
+	}
 	return json.Unmarshal(val.([]byte), ss)
 }
 
@@ -399,20 +411,24 @@ const (
 	ModeUnset                          // Non-zero value to indicate unknown or undefined mode (:0x100, 256),
 	// to make it different from ModeNone
 
-	ModeNone AccessMode = 0 // No access, requests to gain access are processed normally (N)
+	ModeNone AccessMode = 0 // No access, requests to gain access are processed normally (N:0)
 
-	// Normal user's access to a topic ("JRWPS")
+	// Normal user's access to a topic ("JRWPS", 47, 0x2F)
 	ModeCPublic AccessMode = ModeJoin | ModeRead | ModeWrite | ModePres | ModeShare
-	// User's subscription to 'me' and 'fnd' ("JPS")
+	// User's subscription to 'me' and 'fnd' ("JPS", 41, 0x29)
 	ModeCSelf AccessMode = ModeJoin | ModePres | ModeShare
-	// Owner's subscription to a generic topic ("JRWPASDO")
+	// Owner's subscription to a generic topic ("JRWPASDO", 255, 0xFF)
 	ModeCFull AccessMode = ModeJoin | ModeRead | ModeWrite | ModePres | ModeApprove | ModeShare | ModeDelete | ModeOwner
-	// Default P2P access mode ("JRWPA")
+	// Default P2P access mode ("JRWPA", 31, 0x1F)
 	ModeCP2P AccessMode = ModeJoin | ModeRead | ModeWrite | ModePres | ModeApprove
-	// Read-only access to topic ("JR", 0x3)
+	// Default Auth access mode for a user ("JRWPAS", 63, 0x3F).
+	ModeCAuth AccessMode = ModeCP2P | ModeCPublic
+	// Read-only access to topic ("JR", 3)
 	ModeCReadOnly = ModeJoin | ModeRead
+	// Access to 'sys' topic by a root user ("JRWPD", 79, 0x4F)
+	ModeCSys = ModeJoin | ModeRead | ModeWrite | ModePres | ModeDelete
 
-	// Admin: user who can modify access mode ("OA", hex: 0x90, dec: 144)
+	// Admin: user who can modify access mode ("OA", dec: 144, hex: 0x90)
 	ModeCAdmin = ModeOwner | ModeApprove
 	// Sharer: flags which define user who can be notified of access mode changes ("OAS", dec: 176, hex: 0xB0)
 	ModeCSharer = ModeCAdmin | ModeShare
@@ -420,7 +436,7 @@ const (
 	// Invalid mode to indicate an error
 	ModeInvalid AccessMode = 0x100000
 
-	// All possible valid bits (excluding ModeInvalid and ModeUnset)
+	// All possible valid bits (excluding ModeInvalid and ModeUnset) = 0xFF, 255
 	ModeBitmask AccessMode = ModeJoin | ModeRead | ModeWrite | ModePres | ModeApprove | ModeShare | ModeDelete | ModeOwner
 )
 
@@ -477,7 +493,7 @@ Loop:
 	}
 
 	if m0 != ModeUnset {
-		*m = m0
+		*m = (m0 & ModeBitmask)
 	}
 	return nil
 }
@@ -690,7 +706,7 @@ type Subscription struct {
 	// deserialized SeqID from user or topic
 	seqId int
 	// Deserialized TouchedAt from topic
-	touchedAt *time.Time
+	touchedAt time.Time
 	// timestamp when the user was last online
 	lastSeen time.Time
 	// user agent string of the last online access
@@ -723,18 +739,18 @@ func (s *Subscription) GetWith() string {
 }
 
 // GetTouchedAt returns touchedAt.
-func (s *Subscription) GetTouchedAt() *time.Time {
+func (s *Subscription) GetTouchedAt() time.Time {
 	return s.touchedAt
 }
 
 // SetTouchedAt sets the value of touchedAt.
-func (s *Subscription) SetTouchedAt(touchedAt *time.Time) {
-	if s.touchedAt == nil || touchedAt.After(*s.touchedAt) {
+func (s *Subscription) SetTouchedAt(touchedAt time.Time) {
+	if touchedAt.After(s.touchedAt) {
 		s.touchedAt = touchedAt
 	}
 
 	if s.touchedAt.Before(s.UpdatedAt) {
-		s.touchedAt = &s.UpdatedAt
+		s.touchedAt = s.UpdatedAt
 	}
 }
 
@@ -796,7 +812,7 @@ type Topic struct {
 	ObjHeader
 
 	// Timestamp when the last message has passed through the topic
-	TouchedAt *time.Time
+	TouchedAt time.Time
 
 	// Use bearer token or use ACL
 	UseBt bool
@@ -1010,6 +1026,8 @@ const (
 	TopicCatP2P
 	// TopicCatGrp is a a value denoting group topic.
 	TopicCatGrp
+	// TopicCatSys is a constant indicating a system topic.
+	TopicCatSys
 )
 
 // GetTopicCat given topic name returns topic category.
@@ -1023,6 +1041,8 @@ func GetTopicCat(name string) TopicCat {
 		return TopicCatGrp
 	case "fnd":
 		return TopicCatFnd
+	case "sys":
+		return TopicCatSys
 	default:
 		panic("invalid topic type for name '" + name + "'")
 	}

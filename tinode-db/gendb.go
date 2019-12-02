@@ -15,32 +15,9 @@ import (
 	"github.com/tinode/chat/server/store/types"
 )
 
-func genDb(reset bool, config string, data *Data) {
+func genDb(data *Data) {
 	var err error
 	var botAccount string
-
-	defer store.Close()
-
-	err = store.Open(1, config)
-	if err != nil {
-		if strings.Contains(err.Error(), "Database not initialized") {
-			log.Println("Database not found. Creating.", err)
-		} else if strings.Contains(err.Error(), "Invalid database version") {
-			log.Println("Wrong DB version, dropping and recreating the database.", err)
-		} else {
-			log.Fatal("Failed to init DB adapter:", err)
-		}
-	} else if reset {
-		log.Println("Database reset requested")
-	} else {
-		log.Println("Database exists, DB version is correct. All done.", store.GetAdapterName())
-		return
-	}
-
-	err = store.InitDb(config, true)
-	if err != nil {
-		log.Fatal("Failed to init DB:", err)
-	}
 
 	if len(data.Users) == 0 {
 		log.Println("No data provided, stopping")
@@ -60,7 +37,7 @@ func genDb(reset bool, config string, data *Data) {
 		user := types.User{
 			State: uu.State,
 			Access: types.DefaultAccess{
-				Auth: types.ModeCP2P,
+				Auth: types.ModeCAuth,
 				Anon: types.ModeNone,
 			},
 			Tags:   uu.Tags,
@@ -84,7 +61,7 @@ func genDb(reset bool, config string, data *Data) {
 
 		// Save credentials: email and phone number as if they were confirmed.
 		if uu.Email != "" {
-			if err := store.Users.SaveCred(&types.Credential{
+			if _, err := store.Users.UpsertCred(&types.Credential{
 				User:   user.Id,
 				Method: "email",
 				Value:  uu.Email,
@@ -94,7 +71,7 @@ func genDb(reset bool, config string, data *Data) {
 			}
 		}
 		if uu.Tel != "" {
-			if err := store.Users.SaveCred(&types.Credential{
+			if _, err := store.Users.UpsertCred(&types.Credential{
 				User:   user.Id,
 				Method: "tel",
 				Value:  uu.Tel,

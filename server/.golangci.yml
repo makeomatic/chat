@@ -28,6 +28,7 @@ linters-settings:
 linters:
   enable-all: true
   disable:
+    - errcheck
     - maligned
     - prealloc
     - gosec
@@ -39,3 +40,4 @@ run:
   build-tags:
     - mysql
     - rethinkdb
+    - mongodb

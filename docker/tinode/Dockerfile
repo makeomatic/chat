@@ -11,10 +11,10 @@
 
 FROM alpine:latest
 
-ARG VERSION=0.15
+ARG VERSION=0.16.2
 ENV VERSION=$VERSION
 
-LABEL maintainer="Gene Sokolov <gene@tinode.co>"
+LABEL maintainer="Tinode Team <info@tinode.co>"
 LABEL name="TinodeChatServer"
 LABEL version=$VERSION
 
@@ -29,6 +29,13 @@ ENV TARGET_DB=$TARGET_DB
 
 # An option to reset database.
 ENV RESET_DB=false
+
+# An option to upgrade database.
+ENV UPGRADE_DB=false
+
+# Load sample data to database from data.json.
+ARG DEFAULT_SAMPLE_DATA=data.json
+ENV SAMPLE_DATA=
 
 # The MySQL DSN connection.
 ENV MYSQL_DSN='root@tcp(mysql)/tinode'

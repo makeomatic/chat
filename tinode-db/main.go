@@ -8,6 +8,8 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	jcr "github.com/DisposaBoy/JsonConfigReader"
@@ -162,14 +164,16 @@ func getPassword(n int) string {
 }
 
 func main() {
+	log.Println("Initializing", store.GetAdapterName(), store.GetAdapterVersion())
 	var reset = flag.Bool("reset", false, "force database reset")
+	var upgrade = flag.Bool("upgrade", false, "perform database version upgrade")
 	var datafile = flag.String("data", "", "name of file with sample data to load")
 	var conffile = flag.String("config", "./tinode.conf", "config of the database connection")
 
 	flag.Parse()
 
 	var data Data
-	if *datafile != "" {
+	if *datafile != "" && *datafile != "-" {
 		raw, err := ioutil.ReadFile(*datafile)
 		if err != nil {
 			log.Fatal("Failed to parse data:", err)
@@ -190,5 +194,46 @@ func main() {
 		log.Fatal("Failed to parse config file:", err)
 	}
 
-	genDb(*reset, string(config.StoreConfig), &data)
+	err := store.Open(1, config.StoreConfig)
+	defer store.Close()
+
+	if err != nil {
+		if strings.Contains(err.Error(), "Database not initialized") {
+			log.Println("Database not found. Creating.")
+		} else if strings.Contains(err.Error(), "Invalid database version") {
+			msg := "Wrong DB version: expected " + strconv.Itoa(store.GetAdapterVersion()) + ", got " +
+				strconv.Itoa(store.GetDbVersion()) + "."
+			if *reset {
+				log.Println(msg + " Dropping and recreating the database.")
+			} else if *upgrade {
+				log.Println(msg + " Upgrading the database.")
+			} else {
+				log.Fatal(msg + " Use --reset to reset, --upgrade to upgrade.")
+			}
+		} else {
+			log.Fatal("Failed to init DB adapter:", err)
+		}
+	} else if *reset {
+		log.Println("Database reset requested")
+	} else {
+		log.Println("Database exists, DB version is correct. All done.")
+		return
+	}
+
+	if *upgrade {
+		// Upgrade DB from one version to another.
+		err = store.UpgradeDb(config.StoreConfig)
+		if err == nil {
+			log.Println("Database successfully upgraded")
+		}
+	} else {
+		// Reset or create DB
+		err = store.InitDb(config.StoreConfig, true)
+	}
+
+	if err != nil {
+		log.Fatal("Failed to init DB:", err)
+	}
+
+	genDb(&data)
 }

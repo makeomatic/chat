@@ -6,7 +6,7 @@ Drafty is a text format used by Tinode to style messages. The intent of Drafty i
 
 > this is **bold**, `code` and _italic_, ~~strike~~<br/>
 >  combined **bold and _italic_**<br/>
->  an url: https://www.example.com/abc#fragment and another _[https://api.tinode.co](https://api.tinode.co)_<br/>
+>  an url: https://www.example.com/abc#fragment and another _[https://web.tinode.co](https://web.tinode.co)_<br/>
 >  this is a [@mention](#) and a [#hashtag](#) in a string<br/>
 > second [#hashtag](#)<br/>
 
@@ -49,6 +49,8 @@ If `tp` is provided, it means the style is a basic text decoration:
  * `DL`: deleted or strikethrough text: ~~strikethrough~~.
  * `CO`: code or monotyped text, possibly with different background: `monotype`.
  * `BR`: line break.
+ * `RW`: logical grouping of formats, a row.
+ * `HD`: hidden text.
 
 If key is provided, it's a 0-based index into the `ent` field which contains an entity definition such as an image or an URL:
  * `LN`: link (URL) [https://api.tinode.co](https://api.tinode.co)
@@ -117,7 +119,9 @@ In general, an entity is a text decoration which requires additional (possibly l
 #### `LN`: link (URL)
 `LN` is an URL. The `data` contains a single `url` field:
 `{ "tp": "LN", "data": { "url": "https://www.example.com/abc#fragment" } }`
-The `url` could be any valid URl that the client knows how to interpret, for instance it could be email or phone URL too: `email:alice@example.com` or `tel:+17025550001`.
+The `url` could be any valid URL that the client knows how to interpret, for instance it could be email or phone URL too: `email:alice@example.com` or `tel:+17025550001`.
+
+_IMPORTANT Security Consideration_: the `url` field may be maliciously constructed. The client should disable certain URL schemes such as `javascript:` and `data:`.
 
 #### `IM`: inline image or attached image with inline preview
 `IM` is an image. The `data` contains the following fields:
@@ -151,6 +155,9 @@ To create a message with just a single image and no text, use the following Draf
 }
 ```
 
+_IMPORTANT Security Consideration_: the `val` and `ref` fields may contain malicious payload. The client should restrict URL scheme in the `ref` field to `http` and `https` only. The client should present content of `val` field to the user only if it's correctly converted to an image.
+
+
 #### `EX`: file attachment
 `EX` is an attachment which the client should not try to interpret. The `data` contains the following fields:
 ```js
@@ -179,6 +186,8 @@ To generate a message with the file attachment shown as a downloadable file, use
   key: <EX entity reference>
 }
 ```
+
+_IMPORTANT Security Consideration_: the `ref` fields may contain malicious payload. The client should restrict URL scheme in the `ref` field to `http` and `https` only.
 
 #### `MN`: mention such as [@alice](#)
 Mention `data` contains a single `val` field with ID of the mentioned user:
@@ -213,3 +222,5 @@ Hashtag `data` contains a single `val` field with the hashtag value which the cl
 * `ref`: the actual URL for the `url` action.
 
 The button in this example will send a HTTP GET to https://www.example.com/?confirmation=some-value&uid=usrFsk73jYRR
+
+_IMPORTANT Security Consideration_: the client should restrict URL scheme in the `url` field to `http` and `https` only.

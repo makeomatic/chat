@@ -5,11 +5,21 @@ import (
 	t "github.com/tinode/chat/server/store/types"
 )
 
+const validatorName = "tel"
+
 // Empty placeholder struct.
-type validator struct{}
+type validator struct {
+	DebugResponse string `json:"debug_response"`
+	MaxRetries    int    `json:"max_retries"`
+}
 
 // Init is a noop.
-func (*validator) Init(jsonconf string) error {
+func (v *validator) Init(jsonconf string) error {
+	// Implement: Parse config and initialize SMS service.
+
+	v.MaxRetries = 1000
+	v.DebugResponse = "123456"
+
 	return nil
 }
 
@@ -21,9 +31,9 @@ func (*validator) PreCheck(cred string, params interface{}) error {
 }
 
 // Request sends a request for confirmation to the user: makes a record in DB  and nothing else.
-func (*validator) Request(user t.Uid, cred, lang, resp string, tmpToken []byte) error {
+func (*validator) Request(user t.Uid, cred, lang, resp string, tmpToken []byte) (bool, error) {
 	// TODO: actually send a validation SMS or make a call to the provided `cred` here.
-	return nil
+	return true, nil
 }
 
 // ResetSecret sends a message with instructions for resetting an authentication secret.
@@ -33,16 +43,52 @@ func (*validator) ResetSecret(cred, scheme, lang string, tmpToken []byte) error 
 }
 
 // Check checks validity of user's response.
-func (*validator) Check(user t.Uid, resp string) (string, error) {
-	// TODO: check response against a database.
-	return "", nil
+func (v *validator) Check(user t.Uid, resp string) (string, error) {
+	cred, err := store.Users.GetActiveCred(user, validatorName)
+	if err != nil {
+		return "", err
+	}
+
+	if cred == nil {
+		// Request to validate non-existent credential.
+		return "", t.ErrNotFound
+	}
+
+	if cred.Retries > v.MaxRetries {
+		return "", t.ErrPolicy
+	}
+
+	if resp == "" {
+		return "", t.ErrCredentials
+	}
+
+	// Comparing with dummy response too.
+	if cred.Resp == resp || v.DebugResponse == resp {
+		// Valid response, save confirmation.
+		return cred.Value, store.Users.ConfirmCred(user, validatorName)
+	}
+
+	// Invalid response, increment fail counter, ignore possible error.
+	store.Users.FailCred(user, validatorName)
+
+	return "", t.ErrCredentials
 }
 
 // Delete deletes user's records. Returns deleted credentials.
 func (*validator) Delete(user t.Uid) error {
+	return store.Users.DelCred(user, validatorName, "")
+}
+
+// Remove or disable the given record
+func (*validator) Remove(user t.Uid, value string) error {
+	return store.Users.DelCred(user, validatorName, value)
+}
+
+// Implement sending a text message
+func (*validator) send(to, body string) error {
 	return nil
 }
 
 func init() {
-	store.RegisterValidator("tel", &validator{})
+	store.RegisterValidator(validatorName, &validator{})
 }

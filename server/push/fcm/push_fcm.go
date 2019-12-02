@@ -1,3 +1,5 @@
+// Package fcm implements push notification plugin for Google FCM backend.
+// Push notifications for Android, iOS and web clients are sent through Google's Firebase Cloud Messaging service.
 package fcm
 
 import (
@@ -121,8 +123,13 @@ func payloadToData(pl *push.Payload) (map[string]string, error) {
 		return nil, err
 	}
 
-	if len(data["content"]) > 128 {
-		data["content"] = data["content"][:128]
+	// Trim long strings to 80 runes.
+	// Check byte length first and don't waste time converting short strings.
+	if len(data["content"]) > 80 {
+		runes := []rune(data["content"])
+		if len(runes) > 80 {
+			data["content"] = string(runes[:80]) + "…"
+		}
 	}
 
 	return data, nil
@@ -140,8 +147,10 @@ func sendNotifications(rcpt *push.Receipt, config *configType) {
 	// List of UIDs for querying the database
 	uids := make([]t.Uid, len(rcpt.To))
 	skipDevices := make(map[string]bool)
-	for i, to := range rcpt.To {
-		uids[i] = to.User
+	i := 0
+	for uid, to := range rcpt.To {
+		uids[i] = uid
+		i++
 
 		// Some devices were online and received the message. Skip them.
 		for _, deviceID := range to.Devices {
@@ -166,6 +175,7 @@ func sendNotifications(rcpt *push.Receipt, config *configType) {
 					Token: d.DeviceId,
 					Data:  data,
 				}
+
 				if d.Platform == "android" {
 					msg.Android = &fcm.AndroidConfig{
 						Priority: "high",
@@ -177,6 +187,30 @@ func sendNotifications(rcpt *push.Receipt, config *configType) {
 							Icon:  config.Icon,
 							Color: config.IconColor,
 						}
+					}
+				} else if d.Platform == "ios" {
+					// iOS uses Badge to show the total unread message count.
+					badge := rcpt.To[uid].Unread
+					// Need to duplicate these in APNS.Payload.Aps.Alert so
+					// iOS may call NotificationServiceExtension (if present). 
+					title := "New message"
+					body  := data["content"]
+					msg.APNS = &fcm.APNSConfig{
+						Payload: &fcm.APNSPayload{
+							Aps: &fcm.Aps{
+								Badge:          &badge,
+								MutableContent: true,
+								Sound:          "default",
+								Alert: &fcm.ApsAlert{
+									Title: title,
+									Body:  body,
+								},
+							},
+						},
+					}
+					msg.Notification = &fcm.Notification{
+						Title: title,
+						Body:  body,
 					}
 				}
 
@@ -224,7 +258,7 @@ func (Handler) IsReady() bool {
 	return handler.input != nil
 }
 
-// Push return a channel that the server will use to send messages to.
+// Push returns a channel that the server will use to send messages to.
 // If the adapter blocks, the message will be dropped.
 func (Handler) Push() chan<- *push.Receipt {
 	return handler.input

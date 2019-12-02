@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/fnv"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ const (
 	defaultDSN      = "root:@tcp(localhost:3306)/tinode?parseTime=true"
 	defaultDatabase = "tinode"
 
-	dbVersion = 106
+	adpVersion = 109
 
 	adapterName = "mysql"
 
@@ -45,7 +46,7 @@ type configType struct {
 }
 
 // Open initializes database session
-func (a *adapter) Open(jsonconfig string) error {
+func (a *adapter) Open(jsonconfig json.RawMessage) error {
 	if a.db != nil {
 		return errors.New("mysql adapter is already connected")
 	}
@@ -53,7 +54,7 @@ func (a *adapter) Open(jsonconfig string) error {
 	var err error
 	var config configType
 
-	if err = json.Unmarshal([]byte(jsonconfig), &config); err != nil {
+	if err = json.Unmarshal(jsonconfig, &config); err != nil {
 		return errors.New("mysql adapter failed to parse config: " + err.Error())
 	}
 
@@ -104,36 +105,52 @@ func (a *adapter) IsOpen() bool {
 	return a.db != nil
 }
 
-// Read current database version
-func (a *adapter) getDbVersion() (int, error) {
+// GetDbVersion returns current database version.
+func (a *adapter) GetDbVersion() (int, error) {
+	if a.version > 0 {
+		return a.version, nil
+	}
+
 	var vers int
 	err := a.db.Get(&vers, "SELECT `value` FROM kvmeta WHERE `key`='version'")
 	if err != nil {
-		if isMissingDb(err) || err == sql.ErrNoRows {
+		if isMissingDb(err) || isMissingTable(err) || err == sql.ErrNoRows {
 			err = errors.New("Database not initialized")
 		}
 		return -1, err
 	}
+
 	a.version = vers
 
-	return a.version, nil
+	return vers, nil
+}
+
+func (a *adapter) updateDbVersion(v int) error {
+	a.version = -1
+	if _, err := a.db.Exec("UPDATE kvmeta SET `value`=? WHERE `key`='version'", v); err != nil {
+		return err
+	}
+	return nil
 }
 
 // CheckDbVersion checks whether the actual DB version matches the expected version of this adapter.
 func (a *adapter) CheckDbVersion() error {
-	if a.version <= 0 {
-		_, err := a.getDbVersion()
-		if err != nil {
-			return err
-		}
+	version, err := a.GetDbVersion()
+	if err != nil {
+		return err
 	}
 
-	if a.version != dbVersion {
-		return errors.New("Invalid database version " + strconv.Itoa(a.version) +
-			". Expected " + strconv.Itoa(dbVersion))
+	if version != adpVersion {
+		return errors.New("Invalid database version " + strconv.Itoa(version) +
+			". Expected " + strconv.Itoa(adpVersion))
 	}
 
 	return nil
+}
+
+// Version returns adapter version.
+func (adapter) Version() int {
+	return adpVersion
 }
 
 // GetName returns string that adapter uses to register itself with store.
@@ -221,7 +238,8 @@ func (a *adapter) CreateDb(reset bool) error {
 			tag    VARCHAR(96) NOT NULL,
 			PRIMARY KEY(id),
 			FOREIGN KEY(userid) REFERENCES users(id),
-			INDEX usertags_tag (tag)
+			INDEX usertags_tag(tag),
+			UNIQUE INDEX usertags_userid_tag(userid, tag)
 		)`); err != nil {
 		return err
 	}
@@ -284,6 +302,11 @@ func (a *adapter) CreateDb(reset bool) error {
 		return err
 	}
 
+	// Create system topic 'sys'.
+	if err = createSystemTopic(tx); err != nil {
+		return err
+	}
+
 	// Indexed topic tags.
 	if _, err = tx.Exec(
 		`CREATE TABLE topictags(
@@ -292,7 +315,8 @@ func (a *adapter) CreateDb(reset bool) error {
 			tag   VARCHAR(96) NOT NULL,
 			PRIMARY KEY(id),
 			FOREIGN KEY(topic) REFERENCES topics(name),
-			INDEX topictags_tag(tag)
+			INDEX topictags_tag(tag),
+			UNIQUE INDEX topictags_userid_tag(topic, tag)
 		)`); err != nil {
 		return err
 	}
@@ -364,6 +388,7 @@ func (a *adapter) CreateDb(reset bool) error {
 			id        INT NOT NULL AUTO_INCREMENT,
 			createdat DATETIME(3) NOT NULL,
 			updatedat DATETIME(3) NOT NULL,
+			deletedat DATETIME(3),
 			method    VARCHAR(16) NOT NULL,
 			value     VARCHAR(128) NOT NULL,
 			synthetic VARCHAR(192) NOT NULL,
@@ -417,38 +442,138 @@ func (a *adapter) CreateDb(reset bool) error {
 			`)`); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("INSERT INTO kvmeta(`key`, `value`) VALUES('version', ?)", dbVersion); err != nil {
+	if _, err = tx.Exec("INSERT INTO kvmeta(`key`, `value`) VALUES('version', ?)", adpVersion); err != nil {
 		return err
 	}
 
 	return tx.Commit()
 }
 
-func addTags(tx *sqlx.Tx, table, keyName string, keyVal interface{}, tags []string, ignoreDups bool) error {
+func (a *adapter) UpgradeDb() error {
+	bumpVersion := func(a *adapter, x int) error {
+		if err := a.updateDbVersion(x); err != nil {
+			return err
+		}
+		_, err := a.GetDbVersion()
+		return err
+	}
 
-	if len(tags) > 0 {
-		var insert *sql.Stmt
-		var err error
-		insert, err = tx.Prepare("INSERT INTO " + table + "(" + keyName + ",tag) VALUES(?,?)")
-		if err != nil {
+	if _, err := a.GetDbVersion(); err != nil {
+		return err
+	}
+
+	if a.version == 106 {
+		// Perform database upgrade from version 106 to version 107.
+
+		if _, err := a.db.Exec("CREATE UNIQUE INDEX usertags_userid_tag ON usertags(userid, tag)"); err != nil {
 			return err
 		}
 
-		for _, tag := range tags {
-			_, err = insert.Exec(keyVal, tag)
+		if _, err := a.db.Exec("CREATE UNIQUE INDEX topictags_userid_tag ON topictags(topic, tag)"); err != nil {
+			return err
+		}
 
-			if err != nil {
-				if isDupe(err) {
-					if ignoreDups {
-						continue
-					}
-					return t.ErrDuplicate
-				}
-				return err
-			}
+		if _, err := a.db.Exec("ALTER TABLE credentials ADD deletedat DATETIME(3) AFTER updatedat"); err != nil {
+			return err
+		}
+
+		if err := bumpVersion(a, 107); err != nil {
+			return err
 		}
 	}
+
+	if a.version == 107 {
+		// Perform database upgrade from version 107 to version 108.
+
+		// Replace default user access JRWPA with JRWPAS.
+		if _, err := a.db.Exec(`UPDATE users SET access=JSON_REPLACE(access, '$.Auth', 'JRWPAS') 
+			WHERE CAST(JSON_EXTRACT(access, '$.Auth') AS CHAR) LIKE '"JRWPA"'`); err != nil {
+			return err
+		}
+
+		if err := bumpVersion(a, 108); err != nil {
+			return err
+		}
+	}
+
+	if a.version == 108 {
+		tx, err := a.db.Begin()
+		if err != nil {
+			return err
+		}
+		if err = createSystemTopic(tx); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+
+		if err = bumpVersion(a, 109); err != nil {
+			return err
+		}
+	}
+
+	if a.version != adpVersion {
+		return errors.New("Failed to perform database upgrade to version " + strconv.Itoa(adpVersion) +
+			". DB is still at " + strconv.Itoa(a.version))
+	}
 	return nil
+}
+
+func createSystemTopic(tx *sql.Tx) error {
+	now := t.TimeNow()
+	sql := `INSERT INTO topics(createdat,updatedat,name,access,public) 
+				VALUES(?,?,'sys','{"Auth": "N","Anon": "N"}','{"fn": "System"}')`
+	_, err := tx.Exec(sql, now, now)
+	return err
+}
+
+func addTags(tx *sqlx.Tx, table, keyName string, keyVal interface{}, tags []string, ignoreDups bool) error {
+
+	if len(tags) == 0 {
+		return nil
+	}
+
+	var insert *sql.Stmt
+	var err error
+	insert, err = tx.Prepare("INSERT INTO " + table + "(" + keyName + ",tag) VALUES(?,?)")
+	if err != nil {
+		return err
+	}
+
+	for _, tag := range tags {
+		_, err = insert.Exec(keyVal, tag)
+
+		if err != nil {
+			if isDupe(err) {
+				if ignoreDups {
+					continue
+				}
+				return t.ErrDuplicate
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func removeTags(tx *sqlx.Tx, table, keyName string, keyVal interface{}, tags []string) error {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	var args []interface{}
+	for _, tag := range tags {
+		args = append(args, tag)
+	}
+
+	query, args, _ := sqlx.In("DELETE FROM "+table+" WHERE "+keyName+"=? AND tag IN (?)", keyVal, args)
+	query = tx.Rebind(query)
+	_, err := tx.Exec(query, args...)
+
+	return err
 }
 
 // UserCreate creates a new user. Returns error and true if error is due to duplicate user name,
@@ -483,7 +608,7 @@ func (a *adapter) UserCreate(user *t.User) error {
 
 // Add user's authentication record
 func (a *adapter) AuthAddRecord(uid t.Uid, scheme, unique string, authLvl auth.Level,
-	secret []byte, expires time.Time) (bool, error) {
+	secret []byte, expires time.Time) error {
 
 	var exp *time.Time
 	if !expires.IsZero() {
@@ -493,11 +618,11 @@ func (a *adapter) AuthAddRecord(uid t.Uid, scheme, unique string, authLvl auth.L
 		unique, store.DecodeUid(uid), scheme, authLvl, secret, exp)
 	if err != nil {
 		if isDupe(err) {
-			return true, t.ErrDuplicate
+			return t.ErrDuplicate
 		}
-		return false, err
+		return err
 	}
-	return false, nil
+	return nil
 }
 
 // AuthDelScheme deletes an existing authentication scheme for the user.
@@ -519,7 +644,7 @@ func (a *adapter) AuthDelAllRecords(user t.Uid) (int, error) {
 
 // Update user's authentication secret
 func (a *adapter) AuthUpdRecord(uid t.Uid, scheme, unique string, authLvl auth.Level,
-	secret []byte, expires time.Time) (bool, error) {
+	secret []byte, expires time.Time) error {
 	var exp *time.Time
 	if !expires.IsZero() {
 		exp = &expires
@@ -528,10 +653,10 @@ func (a *adapter) AuthUpdRecord(uid t.Uid, scheme, unique string, authLvl auth.L
 	_, err := a.db.Exec("UPDATE auth SET uname=?,authLvl=?,secret=?,expires=? WHERE uname=?",
 		unique, authLvl, secret, exp, unique)
 	if isDupe(err) {
-		return true, t.ErrDuplicate
+		return t.ErrDuplicate
 	}
 
-	return false, err
+	return err
 }
 
 // Retrieve user's authentication record
@@ -613,7 +738,7 @@ func (a *adapter) UserGetAll(ids ...t.Uid) ([]t.User, error) {
 	}
 
 	users := []t.User{}
-	q, _, _ := sqlx.In("SELECT * FROM users WHERE id IN (?) AND deletedat IS NULL", uids)
+	q, uids, _ := sqlx.In("SELECT * FROM users WHERE id IN (?) AND deletedat IS NULL", uids)
 	q = a.db.Rebind(q)
 	rows, err := a.db.Queryx(q, uids...)
 	if err != nil {
@@ -711,7 +836,7 @@ func (a *adapter) UserDelete(uid t.Uid, hard bool) error {
 		}
 
 		// Delete all credentials.
-		if err = credDel(tx, uid, ""); err != nil {
+		if err = credDel(tx, uid, "", ""); err != nil {
 			return err
 		}
 
@@ -812,10 +937,10 @@ func (a *adapter) UserUpdate(uid t.Uid, update map[string]interface{}) error {
 }
 
 // UserUpdateTags adds or resets user's tags
-func (a *adapter) UserUpdateTags(uid t.Uid, tags []string, reset bool) error {
+func (a *adapter) UserUpdateTags(uid t.Uid, add, remove, reset []string) ([]string, error) {
 	tx, err := a.db.Beginx()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	defer func() {
@@ -826,41 +951,40 @@ func (a *adapter) UserUpdateTags(uid t.Uid, tags []string, reset bool) error {
 
 	decoded_uid := store.DecodeUid(uid)
 
-	if reset {
-		// Delete all tags first.
+	if reset != nil {
+		// Delete all tags first if resetting.
 		_, err = tx.Exec("DELETE FROM usertags WHERE userid=?", decoded_uid)
 		if err != nil {
-			return err
+			return nil, err
 		}
+		add = reset
+		remove = nil
 	}
 
-	// Now insert new tags
-	err = addTags(tx, "usertags", "userid", decoded_uid, tags, !reset)
+	// Now insert new tags. Ignore duplicates if resetting.
+	err = addTags(tx, "usertags", "userid", decoded_uid, add, reset == nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	rows, err := tx.Queryx("SELECT tag FROM usertags WHERE userid=?", decoded_uid)
+	// Delete tags.
+	err = removeTags(tx, "usertags", "userid", decoded_uid, remove)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	var allTags []string
-	for rows.Next() {
-		var tag string
-		if err = rows.Scan(&tag); err != nil {
-			break
-		}
-		allTags = append(allTags, tag)
-	}
-
-	_, err = tx.Exec("UPDATE users SET tags=? WHERE id=?", t.StringSlice(tags), decoded_uid)
+	err = tx.Select(&allTags, "SELECT tag FROM usertags WHERE userid=?", decoded_uid)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return tx.Commit()
+	_, err = tx.Exec("UPDATE users SET tags=? WHERE id=?", t.StringSlice(allTags), decoded_uid)
+	if err != nil {
+		return nil, err
+	}
 
+	return allTags, tx.Commit()
 }
 
 // UserGetByCred returns user ID for the given validated credential.
@@ -876,6 +1000,24 @@ func (a *adapter) UserGetByCred(method, value string) (t.Uid, error) {
 		return t.ZeroUid, nil
 	}
 	return t.ZeroUid, err
+}
+
+// UserUnreadCount returns the total number of unread messages in all topics with
+// the R permission.
+func (a *adapter) UserUnreadCount(uid t.Uid) (int, error) {
+	var count int
+	err := a.db.Get(&count, "SELECT SUM(t.seqid)-SUM(s.readseqid) FROM topics AS t, subscriptions AS s "+
+		"WHERE s.userid=? AND t.name=s.topic AND s.deletedat IS NULL AND t.deletedat IS NULL AND "+
+		"INSTR(s.modewant, 'R')>0 AND INSTR(s.modegiven, 'R')>0", store.DecodeUid(uid))
+	if err == nil {
+		return count, nil
+	}
+
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+
+	return -1, err
 }
 
 // *****************************
@@ -1080,7 +1222,7 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 
 	if len(topq) > 0 {
 		// Fetch grp & p2p topics
-		q, _, _ := sqlx.In(
+		q, topq, _ := sqlx.In(
 			"SELECT createdat,updatedat,deletedat,touchedat,name AS id,access,seqid,delid,public,tags "+
 				"FROM topics WHERE name IN (?)", topq)
 		q = a.db.Rebind(q)
@@ -1113,7 +1255,7 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 
 	// Fetch p2p users and join to p2p tables
 	if err == nil && len(usrq) > 0 {
-		q, _, _ := sqlx.In(
+		q, usrq, _ := sqlx.In(
 			"SELECT id,state,createdat,updatedat,deletedat,access,lastseen,useragent,public,tags FROM users WHERE id IN (?)",
 			usrq)
 		rows, err = a.db.Queryx(q, usrq...)
@@ -1164,7 +1306,7 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 		q += " AND u.deletedat IS NULL"
 
 		// For p2p topics we must load all subscriptions including deleted.
-		// Otherwise it will be impossibel to swipe Public values.
+		// Otherwise it will be impossible to swipe Public values.
 		if tcat != t.TopicCatP2P {
 			// Filter out deletd subscriptions.
 			q += " AND s.deletedAt IS NULL"
@@ -1245,7 +1387,7 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 }
 
 // OwnTopics loads a slice of topic names where the user is the owner.
-func (a *adapter) OwnTopics(uid t.Uid, opts *t.QueryOpt) ([]string, error) {
+func (a *adapter) OwnTopics(uid t.Uid) ([]string, error) {
 	rows, err := a.db.Queryx("SELECT name FROM topics WHERE owner=?", store.DecodeUid(uid))
 	if err != nil {
 		return nil, err
@@ -1264,10 +1406,10 @@ func (a *adapter) OwnTopics(uid t.Uid, opts *t.QueryOpt) ([]string, error) {
 	return names, err
 }
 
-func (a *adapter) TopicShare(shares []*t.Subscription) (int, error) {
+func (a *adapter) TopicShare(shares []*t.Subscription) error {
 	tx, err := a.db.Beginx()
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer func() {
 		if err != nil {
@@ -1278,11 +1420,11 @@ func (a *adapter) TopicShare(shares []*t.Subscription) (int, error) {
 	for _, sub := range shares {
 		err = createSubscription(tx, sub, true)
 		if err != nil {
-			return 0, err
+			return err
 		}
 	}
 
-	return len(shares), tx.Commit()
+	return tx.Commit()
 }
 
 // TopicDelete deletes specified topic.
@@ -1369,7 +1511,7 @@ func (a *adapter) TopicUpdate(topic string, update map[string]interface{}) error
 	return tx.Commit()
 }
 
-func (a *adapter) TopicOwnerChange(topic string, newOwner, oldOwner t.Uid) error {
+func (a *adapter) TopicOwnerChange(topic string, newOwner t.Uid) error {
 	_, err := a.db.Exec("UPDATE topics SET owner=? WHERE name=?", store.DecodeUid(newOwner), topic)
 	return err
 }
@@ -1535,8 +1677,15 @@ func (a *adapter) SubsUpdate(topic string, user t.Uid, update map[string]interfa
 // SubsDelete marks subscription as deleted.
 func (a *adapter) SubsDelete(topic string, user t.Uid) error {
 	now := t.TimeNow()
-	_, err := a.db.Exec("UPDATE subscriptions SET updatedat=?, deletedat=? WHERE topic=? AND userid=?",
+	res, err := a.db.Exec("UPDATE subscriptions SET updatedat=?, deletedat=? WHERE topic=? AND userid=? AND deletedat IS NULL",
 		now, now, topic, store.DecodeUid(user))
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err == nil && affected == 0 {
+		err = t.ErrNotFound
+	}
 	return err
 }
 
@@ -1547,7 +1696,8 @@ func (a *adapter) SubsDelForTopic(topic string, hard bool) error {
 		_, err = a.db.Exec("DELETE FROM subscriptions WHERE topic=?", topic)
 	} else {
 		now := t.TimeNow()
-		_, err = a.db.Exec("UPDATE subscriptions SET updatedat=?, deletedat=? WHERE topic=?", now, now, topic)
+		_, err = a.db.Exec("UPDATE subscriptions SET updatedat=?, deletedat=? WHERE topic=? AND deletedat IS NULL",
+			now, now, topic)
 	}
 	return err
 }
@@ -1714,12 +1864,15 @@ func (a *adapter) FindTopics(req, opt []string) ([]t.Subscription, error) {
 
 // Messages
 func (a *adapter) MessageSave(msg *t.Message) error {
+	// store assignes message ID, but we don't use it. Message IDs are not used anywhere.
+	// Using a sequential ID provided by the database.
 	res, err := a.db.Exec(
 		"INSERT INTO messages(createdAt,updatedAt,seqid,topic,`from`,head,content) VALUES(?,?,?,?,?,?,?)",
 		msg.CreatedAt, msg.UpdatedAt, msg.SeqId, msg.Topic,
 		store.DecodeUid(t.ParseUid(msg.From)), msg.Head, toJSON(msg.Content))
 	if err == nil {
 		id, _ := res.LastInsertId()
+		// Replacing ID given by store by ID given by the DB.
 		msg.SetUid(t.Uid(id))
 	}
 	return err
@@ -1728,7 +1881,7 @@ func (a *adapter) MessageSave(msg *t.Message) error {
 func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.Message, error) {
 	var limit = a.maxResults
 	var lower = 0
-	var upper = 1 << 31
+	var upper = 1<<31 - 1
 
 	if opts != nil {
 		if opts.Since > 0 {
@@ -1758,8 +1911,8 @@ func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) (
 	}
 
 	var msgs []t.Message
-	var msg t.Message
 	for rows.Next() {
+		var msg t.Message
 		if err = rows.StructScan(&msg); err != nil {
 			break
 		}
@@ -1783,7 +1936,7 @@ var dellog struct {
 func (a *adapter) MessageGetDeleted(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.DelMessage, error) {
 	var limit = a.maxResults
 	var lower = 0
-	var upper = 1 << 31
+	var upper = 1<<31 - 1
 
 	if opts != nil {
 		if opts.Since > 0 {
@@ -1800,7 +1953,7 @@ func (a *adapter) MessageGetDeleted(topic string, forUser t.Uid, opts *t.QueryOp
 	}
 
 	// Fetch log of deletions
-	rows, err := a.db.Queryx("SELECT topic,deletedfor,delid,low,hi FROM dellog WHERE topic=? AND delid BETWEEN ? and ?"+
+	rows, err := a.db.Queryx("SELECT topic,deletedfor,delid,low,hi FROM dellog WHERE topic=? AND delid BETWEEN ? AND ?"+
 		" AND (deletedFor=0 OR deletedFor=?)"+
 		" ORDER BY delid LIMIT ?", topic, lower, upper, store.DecodeUid(forUser), limit)
 	if err != nil {
@@ -2019,7 +2172,7 @@ func (a *adapter) DeviceGetAll(uids ...t.Uid) (map[t.Uid][]t.DeviceDef, int, err
 		unums = append(unums, store.DecodeUid(uid))
 	}
 
-	q, _, _ := sqlx.In("SELECT userid,deviceid,platform,lastseen,lang FROM devices WHERE userid IN (?)", unums)
+	q, unums, _ := sqlx.In("SELECT userid,deviceid,platform,lastseen,lang FROM devices WHERE userid IN (?)", unums)
 	rows, err := a.db.Queryx(q, unums...)
 	if err != nil {
 		return nil, 0, err
@@ -2085,47 +2238,124 @@ func (a *adapter) DeviceDelete(uid t.Uid, deviceID string) error {
 }
 
 // Credential management
-func (a *adapter) CredAdd(cred *t.Credential) error {
-	// Enforece uniqueness: if credential is confirmed, "method:value" must be unique.
+
+// CredUpsert adds or updates a validation record. Returns true if inserted, false if updated.
+// 1. if credential is validated:
+// 1.1 Hard-delete unconfirmed equivalent record, if exists.
+// 1.2 Insert new. Report error if duplicate.
+// 2. if credential is not validated:
+// 2.1 Check if validated equivalent exist. If so, report an error.
+// 2.2 Soft-delete all unvalidated records of the same method.
+// 2.3 Undelete existing credential. Return if successful.
+// 2.4 Insert new credential record.
+func (a *adapter) CredUpsert(cred *t.Credential) (bool, error) {
+	var err error
+
+	tx, err := a.db.Beginx()
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		if err != nil {
+			log.Println("Rollback")
+			tx.Rollback()
+		}
+	}()
+
+	now := t.TimeNow()
+	userId := decodeUidString(cred.User)
+
+	// Enforce uniqueness: if credential is confirmed, "method:value" must be unique.
 	// if credential is not yet confirmed, "userid:method:value" is unique.
 	synth := cred.Method + ":" + cred.Value
+
 	if !cred.Done {
+		// Check if this credential is already validated.
+		var done bool
+		err = tx.Get(&done, "SELECT done FROM credentials WHERE synthetic=?", synth)
+		if err == nil {
+			return false, t.ErrDuplicate
+		}
+		if err != sql.ErrNoRows {
+			return false, err
+		}
+		// We are going to insert new record.
 		synth = cred.User + ":" + synth
+
+		// Adding new unvalidated credential. Deactivate all unvalidated records of this user and method.
+		_, err = tx.Exec("UPDATE credentials SET deletedat=? WHERE userid=? AND method=? AND done=false",
+			now, userId, cred.Method)
+		// Assume that the record exists and try to update it: undelete, update timestamp and response value.
+		res, err := tx.Exec("UPDATE credentials SET updatedat=?,deletedat=NULL,resp=?,done=0 WHERE synthetic=?",
+			cred.UpdatedAt, cred.Resp, synth)
+		if err != nil {
+			return false, err
+		}
+		// If record was updated, then all is fine.
+		if numrows, _ := res.RowsAffected(); numrows > 0 {
+			return false, tx.Commit()
+		}
+	} else {
+		// Hard-deleting unconformed record if it exists.
+		_, err = tx.Exec("DELETE FROM credentials WHERE synthetic=?", cred.User+":"+synth)
+		if err != nil {
+			return false, err
+		}
 	}
-	_, err := a.db.Exec("INSERT INTO credentials(createdat,updatedat,method,value,synthetic,userid,resp,done) "+
+	// Add new record.
+	_, err = tx.Exec("INSERT INTO credentials(createdat,updatedat,method,value,synthetic,userid,resp,done) "+
 		"VALUES(?,?,?,?,?,?,?,?)",
-		cred.CreatedAt, cred.UpdatedAt, cred.Method, cred.Value, synth,
-		decodeUidString(cred.User), cred.Resp, cred.Done)
-	if isDupe(err) {
-		return t.ErrDuplicate
+		cred.CreatedAt, cred.UpdatedAt, cred.Method, cred.Value, synth, userId, cred.Resp, cred.Done)
+	if err != nil {
+		if isDupe(err) {
+			return true, t.ErrDuplicate
+		}
+		return true, err
 	}
-	return err
+	return true, tx.Commit()
 }
 
-func (a *adapter) CredIsConfirmed(uid t.Uid, method string) (bool, error) {
-	var done int
-	err := a.db.Get(&done, "SELECT done FROM credentials WHERE userid=? AND method=?",
-		store.DecodeUid(uid), method)
-	if err == sql.ErrNoRows {
-		// Nothing found, clear the error, otherwise it will be reported as internal error.
-		err = nil
-	}
-
-	return done > 0, err
-}
-
-func credDel(tx *sqlx.Tx, uid t.Uid, method string) error {
-	query := "DELETE FROM credentials WHERE userid=?"
+// credDel deletes given validation method or all methods of the given user.
+// 1. If user is being deleted, hard-delete all records (method == "")
+// 2. If one value is being deleted:
+// 2.1 Delete it if it's valiated or if there were no attempts at validation
+// (otherwise it could be used to circumvent the limit on validation attempts).
+// 2.2 In that case mark it as soft-deleted.
+func credDel(tx *sqlx.Tx, uid t.Uid, method, value string) error {
+	constraints := " WHERE userid=?"
 	args := []interface{}{store.DecodeUid(uid)}
+
 	if method != "" {
-		query += " AND method=?"
+		constraints += " AND method=?"
 		args = append(args, method)
+
+		if value != "" {
+			constraints += " AND value=?"
+			args = append(args, value)
+		}
 	}
-	_, err := tx.Exec(query, args...)
+
+	if method == "" {
+		_, err := tx.Exec("DELETE FROM credentials"+constraints, args...)
+		return err
+	}
+
+	// Case 2.1
+	if _, err := tx.Exec("DELETE FROM credentials"+constraints+" AND (done=true OR retries=0)", args...); err != nil {
+		return err
+	}
+
+	// Case 2.2
+	args = append([]interface{}{t.TimeNow()}, args...)
+	_, err := tx.Exec("UPDATE credentials SET deletedat=?"+constraints, args...)
+
 	return err
 }
 
-func (a *adapter) CredDel(uid t.Uid, method string) error {
+// CredDel deletes either credentials of the given user. If method is blank all
+// credentials are removed. If value is blank all credentials of the given the
+// method are removed.
+func (a *adapter) CredDel(uid t.Uid, method, value string) error {
 	tx, err := a.db.Beginx()
 	if err != nil {
 		return err
@@ -2136,7 +2366,7 @@ func (a *adapter) CredDel(uid t.Uid, method string) error {
 		}
 	}()
 
-	err = credDel(tx, uid, method)
+	err = credDel(tx, uid, method, value)
 	if err != nil {
 		return err
 	}
@@ -2144,9 +2374,11 @@ func (a *adapter) CredDel(uid t.Uid, method string) error {
 	return tx.Commit()
 }
 
+// CredConfirm marks given credential method as confirmed.
 func (a *adapter) CredConfirm(uid t.Uid, method string) error {
 	res, err := a.db.Exec(
-		"UPDATE credentials SET updatedat=?,done=1,synthetic=CONCAT(method,':',value) WHERE userid=? AND method=?",
+		"UPDATE credentials SET updatedat=?,done=true,synthetic=CONCAT(method,':',value) "+
+			"WHERE userid=? AND method=? AND deletedat IS NULL AND done=false",
 		t.TimeNow(), store.DecodeUid(uid), method)
 	if err != nil {
 		if isDupe(err) {
@@ -2160,37 +2392,54 @@ func (a *adapter) CredConfirm(uid t.Uid, method string) error {
 	return nil
 }
 
+// CredFail increments failure count of the given validation method.
 func (a *adapter) CredFail(uid t.Uid, method string) error {
-	_, err := a.db.Exec("UPDATE credentials SET updatedat=?,retries=retries+1 WHERE userid=? AND method=?",
+	_, err := a.db.Exec("UPDATE credentials SET updatedat=?,retries=retries+1 WHERE userid=? AND method=? AND done=false",
 		t.TimeNow(), store.DecodeUid(uid), method)
 	return err
 }
 
-func (a *adapter) CredGet(uid t.Uid, method string) ([]*t.Credential, error) {
-	query := "SELECT createdat,updatedat,method,value,resp,done,retries " +
-		"FROM credentials WHERE userid=?"
+// CredGetActive returns currently active unvalidated credential of the given user and method.
+func (a *adapter) CredGetActive(uid t.Uid, method string) (*t.Credential, error) {
+	var cred t.Credential
+	err := a.db.Get(&cred, "SELECT createdat,updatedat,method,value,resp,done,retries "+
+		"FROM credentials WHERE userid=? AND deletedat IS NULL AND method=? AND done=false",
+		store.DecodeUid(uid), method)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			err = nil
+		}
+		return nil, err
+	}
+	cred.User = uid.String()
+
+	return &cred, nil
+}
+
+// CredGetAll returns credential records for the given user and method, all or validated only.
+func (a *adapter) CredGetAll(uid t.Uid, method string, validatedOnly bool) ([]t.Credential, error) {
+	query := "SELECT createdat,updatedat,method,value,resp,done,retries FROM credentials WHERE userid=? AND deletedat IS NULL"
 	args := []interface{}{store.DecodeUid(uid)}
 	if method != "" {
 		query += " AND method=?"
 		args = append(args, method)
 	}
-	rows, err := a.db.Queryx(query, args...)
+	if validatedOnly {
+		query += " AND done=true"
+	}
+
+	var credentials []t.Credential
+	err := a.db.Select(&credentials, query, args...)
 	if err != nil {
 		return nil, err
 	}
 
-	var result []*t.Credential
-	for rows.Next() {
-		var cred t.Credential
-		if err = rows.StructScan(&cred); err != nil {
-			break
-		}
-		cred.User = uid.String()
-		result = append(result, &cred)
+	user := uid.String()
+	for i := range credentials {
+		credentials[i].User = user
 	}
-	rows.Close()
 
-	return result, err
+	return credentials, err
 }
 
 // FileUploads
@@ -2301,7 +2550,7 @@ func (a *adapter) FileDeleteUnused(olderThan time.Time, limit int) ([]string, er
 	}
 
 	if len(ids) > 0 {
-		query, _, _ = sqlx.In("DELETE FROM fileuploads WHERE id IN (?)", ids)
+		query, ids, _ = sqlx.In("DELETE FROM fileuploads WHERE id IN (?)", ids)
 		_, err = tx.Exec(query, ids...)
 		if err != nil {
 			return nil, err
@@ -2321,6 +2570,15 @@ func isDupe(err error) bool {
 
 	myerr, ok := err.(*ms.MySQLError)
 	return ok && myerr.Number == 1062
+}
+
+func isMissingTable(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	myerr, ok := err.(*ms.MySQLError)
+	return ok && myerr.Number == 1146
 }
 
 func isMissingDb(err error) bool {
@@ -2392,5 +2650,5 @@ func extractTags(update map[string]interface{}) []string {
 }
 
 func init() {
-	store.RegisterAdapter(adapterName, &adapter{})
+	store.RegisterAdapter(&adapter{})
 }
