@@ -19,6 +19,8 @@ import (
 	"github.com/tinode/chat/pbx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/channelz/service"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -80,6 +82,10 @@ func (sess *Session) writeGrpcLoop() {
 				// channel closed
 				return
 			}
+			if len(sess.send) > sendQueueLimit {
+				log.Println("grpc: outbound queue limit exceeded", sess.sid)
+				return
+			}
 			if err := grpcWrite(sess, msg); err != nil {
 				log.Println("grpc: write", sess.sid, err)
 				return
@@ -139,6 +145,8 @@ func serveGrpc(addr string, kaEnabled bool, tlsConf *tls.Config) (*grpc.Server, 
 	}
 
 	srv := grpc.NewServer(opts...)
+	reflection.Register(srv)
+	service.RegisterChannelzServiceToServer(srv)
 	pbx.RegisterNodeServer(srv, &grpcNodeServer{})
 	log.Printf("gRPC/%s%s server is registered at [%s]", grpc.Version, secure, addr)
 
