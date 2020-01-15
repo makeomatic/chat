@@ -2556,7 +2556,9 @@ func (t *Topic) makePushReceipt(fromUid types.Uid, data *MsgServerData) *push.Re
 			From:      data.From,
 			Timestamp: data.Timestamp,
 			SeqId:     data.SeqId,
-			Content:   data.Content}}
+			Content:   data.Content,
+			Head:      data.Head,
+		}}
 
 	for uid := range t.perUser {
 		// Send only to those who have notifications enabled, exclude the originating user.
