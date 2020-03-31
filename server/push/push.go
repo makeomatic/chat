@@ -41,6 +41,8 @@ type Payload struct {
 	ContentType string `json:"mime"`
 	// Actual Data.Content of the message, if requested
 	Content interface{} `json:"content,omitempty"`
+	// Message head with custom parameters
+	Head map[string]interface{} `json:"head,omitempty"`
 }
 
 // Handler is an interface which must be implemented by handlers.
