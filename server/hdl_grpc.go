@@ -19,6 +19,8 @@ import (
 	"github.com/tinode/chat/pbx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/reflection"
+	"google.golang.org/grpc/channelz/service"
 	"google.golang.org/grpc/keepalive"
 )
 
@@ -143,6 +145,8 @@ func serveGrpc(addr string, kaEnabled bool, tlsConf *tls.Config) (*grpc.Server, 
 	}
 
 	srv := grpc.NewServer(opts...)
+	reflection.Register(srv)
+	service.RegisterChannelzServiceToServer(srv)
 	pbx.RegisterNodeServer(srv, &grpcNodeServer{})
 	log.Printf("gRPC/%s%s server is registered at [%s]", grpc.Version, secure, addr)
 
